@@ -65,37 +65,29 @@ TableStorageInfo LevelPivotTableEntry::GetStorageInfo(ClientContext &context) {
 vector<column_t> LevelPivotTableEntry::GetRowIdColumns() const {
 	vector<column_t> result;
 	if (mode_ == LevelPivotTableMode::PIVOT) {
-		// Return identity column indices as row identifiers
-		for (auto &id_col : identity_columns_) {
-			auto it = col_name_to_index_.find(id_col);
-			if (it != col_name_to_index_.end()) {
-				result.push_back(it->second);
-			}
+		for (idx_t i = 0; i < identity_columns_.size(); i++) {
+			result.push_back(LEVEL_PIVOT_VIRTUAL_COL_BASE + i);
 		}
 	} else {
-		// Raw mode: key column (index 0) is the row identifier
-		result.push_back(0);
+		result.push_back(LEVEL_PIVOT_VIRTUAL_COL_BASE);
 	}
 	return result;
 }
 
 virtual_column_map_t LevelPivotTableEntry::GetVirtualColumns() const {
 	virtual_column_map_t result;
-	// Add the standard rowid virtual column
 	result.insert(make_pair(COLUMN_IDENTIFIER_ROW_ID, TableColumn("rowid", LogicalType::ROW_TYPE)));
-	// Add identity columns as virtual columns so BindRowIdColumns can find them
 	if (mode_ == LevelPivotTableMode::PIVOT) {
-		for (auto &id_col : identity_columns_) {
-			auto it = col_name_to_index_.find(id_col);
+		for (idx_t i = 0; i < identity_columns_.size(); i++) {
+			auto it = col_name_to_index_.find(identity_columns_[i]);
 			if (it != col_name_to_index_.end()) {
 				auto &col = GetColumns().GetColumn(LogicalIndex(it->second));
-				result.insert(make_pair(it->second, TableColumn(col.Name(), col.Type())));
+				result.insert(make_pair(LEVEL_PIVOT_VIRTUAL_COL_BASE + i, TableColumn(col.Name(), col.Type())));
 			}
 		}
 	} else {
-		// Raw mode: key column (index 0)
 		auto &key_col = GetColumns().GetColumn(LogicalIndex(0));
-		result.insert(make_pair(0, TableColumn(key_col.Name(), key_col.Type())));
+		result.insert(make_pair(LEVEL_PIVOT_VIRTUAL_COL_BASE, TableColumn(key_col.Name(), key_col.Type())));
 	}
 	return result;
 }

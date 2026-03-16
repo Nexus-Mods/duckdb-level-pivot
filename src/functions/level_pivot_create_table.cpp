@@ -60,7 +60,7 @@ static unique_ptr<FunctionData> CreateTableBind(ClientContext &context, TableFun
 				}
 			}
 			data->column_json.push_back(is_json);
-			data->column_types.push_back(TransformStringToLogicalType(type_str));
+			data->column_types.push_back(TransformStringToLogicalType(type_str, context));
 		}
 	} else {
 		// Default: all VARCHAR, no JSON

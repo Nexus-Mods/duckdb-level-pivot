@@ -1,5 +1,5 @@
 #include "level_pivot_scan.hpp"
-#include "level_pivot_table_entry.hpp"
+#include "level_pivot_table_entry.hpp" // includes LEVEL_PIVOT_VIRTUAL_COL_BASE
 #include "level_pivot_utils.hpp"
 #include "key_parser.hpp"
 #include "level_pivot_storage.hpp"
@@ -220,6 +220,24 @@ static void PivotScan(LevelPivotTableEntry &table_entry, LevelPivotScanLocalStat
 			if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
 				continue;
 			}
+
+			// Resolve virtual column IDs to real column indices
+			if (col_idx >= LEVEL_PIVOT_VIRTUAL_COL_BASE) {
+				auto identity_idx = col_idx - LEVEL_PIVOT_VIRTUAL_COL_BASE;
+				if (identity_idx < identity_cols.size()) {
+					auto &id_col_name = identity_cols[identity_idx];
+					auto real_idx = table_entry.GetColumnIndex(id_col_name);
+					auto &col = columns.GetColumn(LogicalIndex(real_idx));
+					auto capture_idx = parser.pattern().capture_index(id_col_name);
+					IdentityMapping im;
+					im.capture_index = capture_idx >= 0 ? static_cast<idx_t>(capture_idx) : 0;
+					im.output_col = i;
+					im.type = col.Type();
+					lstate.identity_mappings.push_back(std::move(im));
+				}
+				continue;
+			}
+
 			auto &col = columns.GetColumn(LogicalIndex(col_idx));
 			auto &col_name = col.Name();
 
@@ -377,6 +395,10 @@ static void RawScan(LevelPivotTableEntry &table_entry, LevelPivotScanLocalState 
 			if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
 				continue;
 			}
+			// Resolve virtual column IDs: LEVEL_PIVOT_VIRTUAL_COL_BASE + 0 = key column
+			if (col_idx >= LEVEL_PIVOT_VIRTUAL_COL_BASE) {
+				col_idx = col_idx - LEVEL_PIVOT_VIRTUAL_COL_BASE;
+			}
 			auto &col_type = columns.GetColumn(LogicalIndex(col_idx)).Type();
 			bool is_json = table_entry.IsJsonColumn(col_idx);
 			if (col_idx == 0) {
@@ -416,6 +438,11 @@ static void LevelPivotScanFunc(ClientContext &context, TableFunctionInput &data,
 	}
 }
 
+static BindInfo LevelPivotGetBindInfo(const optional_ptr<FunctionData> bind_data) {
+	auto &scan_data = bind_data->Cast<LevelPivotScanData>();
+	return BindInfo(*scan_data.table_entry);
+}
+
 TableFunction LevelPivotScanFunction() {
 	TableFunction func("level_pivot_scan", {}, LevelPivotScanFunc);
 	func.init_global = LevelPivotInitGlobal;
@@ -423,6 +450,7 @@ TableFunction LevelPivotScanFunction() {
 	func.projection_pushdown = true;
 	func.filter_pushdown = false;
 	func.pushdown_complex_filter = LevelPivotPushdownComplexFilter;
+	func.get_bind_info = LevelPivotGetBindInfo;
 	return func;
 }
 

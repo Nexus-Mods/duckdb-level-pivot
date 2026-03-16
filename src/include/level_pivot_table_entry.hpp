@@ -1,12 +1,18 @@
 #pragma once
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/constants.hpp"
 #include "key_parser.hpp"
 #include "level_pivot_storage.hpp"
 #include <memory>
 #include <unordered_map>
 
 namespace duckdb {
+
+// Virtual column IDs for identity/key columns used as row identifiers.
+// These must be >= VIRTUAL_COLUMN_START (2^63). We use VIRTUAL_COLUMN_START + 1 + i
+// to avoid colliding with COLUMN_IDENTIFIER_ROW_ID.
+static constexpr column_t LEVEL_PIVOT_VIRTUAL_COL_BASE = 9223372036854775809ULL; // VIRTUAL_COLUMN_START + 1
 
 enum class LevelPivotTableMode : uint8_t { PIVOT, RAW };
 

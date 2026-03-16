@@ -92,7 +92,7 @@ SinkFinalizeType LevelPivotInsert::Finalize(Pipeline &pipeline, Event &event, Cl
 	return SinkFinalizeType::READY;
 }
 
-SourceResultType LevelPivotInsert::GetData(ExecutionContext &context, DataChunk &chunk,
+SourceResultType LevelPivotInsert::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                            OperatorSourceInput &input) const {
 	return EmitRowCount(*sink_state, chunk);
 }

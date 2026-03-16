@@ -10,7 +10,6 @@
 #include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/common/enums/access_mode.hpp"
 #include "duckdb/main/config.hpp"
-#include <type_traits>
 
 namespace duckdb {
 
@@ -59,28 +58,6 @@ LevelPivotCreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_in
 	return make_uniq<LevelPivotTransactionManager>(db);
 }
 
-// DuckDB API compatibility: In v1.4.4, storage extensions are registered by
-// assigning into the public DBConfig::storage_extensions map. In later versions,
-// that map became private and StorageExtension::Register() is the public API.
-// We use SFINAE to detect which API is available at compile time.
-template <typename SE, typename = void>
-struct has_se_register : std::false_type {};
-
-template <typename SE>
-struct has_se_register<SE, std::void_t<decltype(SE::Register(std::declval<DBConfig &>(), std::declval<const string &>(),
-                                                             std::declval<shared_ptr<SE>>()))>> : std::true_type {};
-
-template <typename SE = StorageExtension, std::enable_if_t<has_se_register<SE>::value, int> = 0>
-static void RegisterStorageExt(DBConfig &config, unique_ptr<StorageExtension> ext) {
-	auto shared = shared_ptr<SE>(ext.release());
-	SE::Register(config, "level_pivot", std::move(shared));
-}
-
-template <typename SE = StorageExtension, std::enable_if_t<!has_se_register<SE>::value, int> = 0>
-static void RegisterStorageExt(DBConfig &config, unique_ptr<StorageExtension> ext) {
-	config.storage_extensions["level_pivot"] = std::move(ext);
-}
-
 static void LoadInternal(ExtensionLoader &loader) {
 	// Register storage extension
 	auto storage_ext = make_uniq<StorageExtension>();
@@ -88,7 +65,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	storage_ext->create_transaction_manager = LevelPivotCreateTransactionManager;
 	auto &db = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(db);
-	RegisterStorageExt(config, std::move(storage_ext));
+	auto shared = shared_ptr<StorageExtension>(storage_ext.release());
+	StorageExtension::Register(config, "level_pivot", std::move(shared));
 
 	// Register utility table functions
 	loader.RegisterFunction(GetCreateTableFunction());

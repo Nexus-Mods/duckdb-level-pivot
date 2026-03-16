@@ -32,7 +32,7 @@ public:
 	bool IsSource() const override {
 		return true;
 	}
-	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const override;
 };
 
 } // namespace duckdb

@@ -114,7 +114,7 @@ SinkFinalizeType LevelPivotUpdate::Finalize(Pipeline &pipeline, Event &event, Cl
 	return SinkFinalizeType::READY;
 }
 
-SourceResultType LevelPivotUpdate::GetData(ExecutionContext &context, DataChunk &chunk,
+SourceResultType LevelPivotUpdate::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                            OperatorSourceInput &input) const {
 	return EmitRowCount(*sink_state, chunk);
 }

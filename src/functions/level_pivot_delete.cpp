@@ -26,9 +26,13 @@ SinkResultType LevelPivotDelete::Sink(ExecutionContext &context, DataChunk &chun
 		std::vector<std::string> identity_values;
 		identity_values.reserve(chunk.ColumnCount());
 
+		auto row_id_cols = ctx.table.GetRowIdColumns();
+		idx_t num_row_id_cols = row_id_cols.size();
+		idx_t row_id_offset = chunk.ColumnCount() - num_row_id_cols;
+
 		for (idx_t row = 0; row < chunk.size(); row++) {
-			// The child plan emits the identity columns (from GetRowIdColumns)
-			ExtractIdentityValues(identity_values, chunk, row, 0, chunk.ColumnCount());
+			// The row ID columns are at the END of the chunk (added by BindRowIdColumns)
+			ExtractIdentityValues(identity_values, chunk, row, row_id_offset, num_row_id_cols);
 
 			// Find all keys matching this identity and delete them
 			std::string prefix = parser.build_prefix(identity_values);
@@ -78,7 +82,7 @@ SinkFinalizeType LevelPivotDelete::Finalize(Pipeline &pipeline, Event &event, Cl
 	return SinkFinalizeType::READY;
 }
 
-SourceResultType LevelPivotDelete::GetData(ExecutionContext &context, DataChunk &chunk,
+SourceResultType LevelPivotDelete::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                            OperatorSourceInput &input) const {
 	return EmitRowCount(*sink_state, chunk);
 }
