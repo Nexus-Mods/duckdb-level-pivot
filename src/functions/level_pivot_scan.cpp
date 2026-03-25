@@ -368,13 +368,6 @@ static void PivotScan(LevelPivotTableEntry &table_entry, LevelPivotScanLocalStat
 	}
 
 	if (!lstate.iterator || !lstate.iterator->valid()) {
-		if (lstate.iterator) {
-			auto err = lstate.iterator->status();
-			if (!err.empty()) {
-				throw IOException("LevelDB iterator error during pivot scan (returned %llu rows before failing): %s",
-				                  (unsigned long long)count, err);
-			}
-		}
 		gstate.done = true;
 	}
 
@@ -419,13 +412,6 @@ static void RawScan(LevelPivotTableEntry &table_entry, LevelPivotScanLocalState 
 	}
 
 	if (!lstate.iterator || !lstate.iterator->valid()) {
-		if (lstate.iterator) {
-			auto err = lstate.iterator->status();
-			if (!err.empty()) {
-				throw IOException("LevelDB iterator error during raw scan (returned %llu rows before failing): %s",
-				                  (unsigned long long)count, err);
-			}
-		}
 		gstate.done = true;
 	}
 

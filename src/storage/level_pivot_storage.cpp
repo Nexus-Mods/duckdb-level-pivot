@@ -59,11 +59,6 @@ std::string_view LevelDBIterator::value_view() const {
 	return std::string_view(s.data(), s.size());
 }
 
-std::string LevelDBIterator::status() const {
-	auto s = iter_->status();
-	return s.ok() ? std::string() : s.ToString();
-}
-
 // --- LevelDBWriteBatch ---
 
 LevelDBWriteBatch::LevelDBWriteBatch(LevelDBConnection *connection)

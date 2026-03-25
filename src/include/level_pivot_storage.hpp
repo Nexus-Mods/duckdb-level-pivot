@@ -46,9 +46,6 @@ public:
 	std::string value() const;
 	std::string_view key_view() const;
 	std::string_view value_view() const;
-	// Returns a non-OK status if the iterator stopped due to an I/O or corruption error.
-	// Must be called after valid() returns false to distinguish end-of-data from an error.
-	std::string status() const;
 
 private:
 	std::unique_ptr<leveldb::Iterator> iter_;
