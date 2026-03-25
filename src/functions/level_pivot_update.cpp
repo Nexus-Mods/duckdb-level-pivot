@@ -1,7 +1,7 @@
 #include "level_pivot_update.hpp"
+#include "key_parser.hpp"
 #include "level_pivot_sink_helpers.hpp"
 #include "level_pivot_utils.hpp"
-#include "key_parser.hpp"
 
 namespace duckdb {
 
@@ -115,7 +115,7 @@ SinkFinalizeType LevelPivotUpdate::Finalize(Pipeline &pipeline, Event &event, Cl
 }
 
 SourceResultType LevelPivotUpdate::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
-                                           OperatorSourceInput &input) const {
+                                                   OperatorSourceInput &input) const {
 	return EmitRowCount(*sink_state, chunk);
 }
 
