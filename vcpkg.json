@@ -1,6 +1,9 @@
 {
 	"dependencies": [
-		"leveldb"
+		{
+			"name": "leveldb",
+			"features": ["snappy", "crc32c"]
+		}
 	],
 	"vcpkg-configuration": {
 		"overlay-ports": [
