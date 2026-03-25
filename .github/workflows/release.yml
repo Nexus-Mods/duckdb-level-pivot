@@ -2,6 +2,11 @@ name: Deploy Extension to GitHub Pages
 
 on:
   workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'CI run ID to deploy (leave blank for latest successful)'
+        required: false
+        default: ''
   release:
     types: [published]
 
@@ -28,20 +33,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          run_id=$(gh run list \
-            --branch main \
-            --workflow "Main Extension Distribution Pipeline" \
-            --status success \
-            --limit 1 \
-            --json databaseId \
-            --jq '.[0].databaseId')
-
-          if [ -z "$run_id" ]; then
-            echo "::error::No successful CI run found on main"
-            exit 1
+          if [ -n "${{ inputs.run_id }}" ]; then
+            run_id="${{ inputs.run_id }}"
+            echo "Using specified run: $run_id"
+          else
+            run_id=$(gh run list \
+              --branch main \
+              --workflow "Main Extension Distribution Pipeline" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')
+            if [ -z "$run_id" ]; then
+              echo "::error::No successful CI run found on main"
+              exit 1
+            fi
+            echo "Using latest successful run: $run_id"
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-          echo "Using CI run: $run_id"
 
       - name: Download build artifacts
         env:
