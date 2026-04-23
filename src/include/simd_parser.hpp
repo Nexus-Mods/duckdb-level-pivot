@@ -306,9 +306,8 @@ public:
 	 * @param num_captures Number of capture segments (not including attr)
 	 */
 	SimdKeyParser(std::string_view prefix, std::string_view delimiter, size_t num_captures)
-	    : prefix_(prefix), delimiter_(delimiter), num_captures_(num_captures),
-	      has_prefix_delimiter_(!prefix.empty()), num_delimiters_(num_captures + (prefix.empty() ? 0 : 1)),
-	      find_delimiters_(detail::get_find_delimiters()) {
+	    : prefix_(prefix), delimiter_(delimiter), num_captures_(num_captures), has_prefix_delimiter_(!prefix.empty()),
+	      num_delimiters_(num_captures + (prefix.empty() ? 0 : 1)), find_delimiters_(detail::get_find_delimiters()) {
 	}
 
 	/**
