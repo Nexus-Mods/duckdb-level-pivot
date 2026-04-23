@@ -6,7 +6,7 @@ A DuckDB storage extension that wraps [LevelDB](https://github.com/google/leveld
 
 ```sql
 SET allow_unsigned_extensions = true;
-INSTALL level_pivot FROM 'https://halgari.github.io/duckdb-level-pivot/current_release';
+INSTALL level_pivot FROM 'https://nexus-mods.github.io/duckdb-level-pivot/current_release';
 LOAD level_pivot;
 ```
 
@@ -15,7 +15,7 @@ Requires DuckDB v1.4.4. The extension is not yet in the DuckDB community registr
 To update to a newer version:
 
 ```sql
-FORCE INSTALL level_pivot FROM 'https://halgari.github.io/duckdb-level-pivot/current_release';
+FORCE INSTALL level_pivot FROM 'https://nexus-mods.github.io/duckdb-level-pivot/current_release';
 ```
 
 ## How It Works
