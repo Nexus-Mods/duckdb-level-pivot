@@ -10,7 +10,7 @@ extension:
     - halgari
 
 repo:
-  github: halgari/duckdb-level-pivot
+  github: Nexus-Mods/duckdb-level-pivot
   ref: fffc3f36aa7e72698efe523070fab3af25340161
 
 docs:
