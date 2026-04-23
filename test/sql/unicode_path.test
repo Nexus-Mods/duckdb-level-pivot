@@ -1,0 +1,31 @@
+# name: test/sql/unicode_path.test
+# description: LevelDB databases must open at paths containing non-ASCII characters on Windows.
+# group: [sql]
+
+require level_pivot
+
+# Cyrillic-containing database-directory name under the test temp dir.
+# Before the UTF-8 -> UTF-16 Win32 API fix in util/env_windows.cc, this
+# would fail on Windows with "NotFound: ...LOCK: The system cannot find
+# the path specified." because LevelDB's ANSI file APIs reinterpreted
+# the UTF-8 bytes via the system code page.
+statement ok
+ATTACH '__TEST_DIR__/state_юр_v2' AS udb (TYPE level_pivot, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('udb', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+statement ok
+INSERT INTO udb.kv VALUES ('k1', 'v1');
+
+statement ok
+INSERT INTO udb.kv VALUES ('k2', 'v2');
+
+query II rowsort
+SELECT key, value FROM udb.kv;
+----
+k1	v1
+k2	v2
+
+statement ok
+DETACH udb;
