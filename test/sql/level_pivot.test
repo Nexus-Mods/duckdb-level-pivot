@@ -81,6 +81,95 @@ SELECT count(*) FROM testdb.kv WHERE key IN ('foo', 'hello');
 ----
 1
 
+# ===== Raw-mode upsert behaviour =====
+# Vortex relies on plain INSERT being upsert-on-key for raw tables (no UNIQUE
+# constraints exist; the Sink calls batch.put which overwrites). These tests
+# pin that behaviour so a future change to the insert path can't regress it.
+
+# Re-INSERT same key with a different value -> single row, latest value wins
+statement ok
+INSERT INTO testdb.kv VALUES ('upsert_key', 'first');
+
+statement ok
+INSERT INTO testdb.kv VALUES ('upsert_key', 'second');
+
+query II
+SELECT * FROM testdb.kv WHERE key = 'upsert_key';
+----
+upsert_key	second
+
+# Multi-row INSERT with duplicate keys in one statement -> last wins
+statement ok
+INSERT INTO testdb.kv VALUES
+  ('multi_dup', 'a'),
+  ('multi_dup', 'b'),
+  ('multi_dup', 'c');
+
+query II
+SELECT * FROM testdb.kv WHERE key = 'multi_dup';
+----
+multi_dup	c
+
+# INSERT after DELETE for the same key -> row reappears with the new value
+statement ok
+INSERT INTO testdb.kv VALUES ('reborn', 'v1');
+
+statement ok
+DELETE FROM testdb.kv WHERE key = 'reborn';
+
+query I
+SELECT count(*) FROM testdb.kv WHERE key = 'reborn';
+----
+0
+
+statement ok
+INSERT INTO testdb.kv VALUES ('reborn', 'v2');
+
+query II
+SELECT * FROM testdb.kv WHERE key = 'reborn';
+----
+reborn	v2
+
+# Bulk INSERT of distinct keys (sanity check that batched VALUES work).
+# 256 rows mirrors the per-statement chunk size we plan to use on the
+# Vortex side; if DuckDB silently caps parameters or the Sink mishandles
+# large chunks, this query will fail or return the wrong count.
+statement ok
+INSERT INTO testdb.kv
+  SELECT 'bulk_' || i::VARCHAR, 'v' || i::VARCHAR FROM range(0, 256) t(i);
+
+query I
+SELECT count(*) FROM testdb.kv WHERE starts_with(key, 'bulk_');
+----
+256
+
+# Re-INSERT all 256 with new values -> still 256 keys, all updated
+statement ok
+INSERT INTO testdb.kv
+  SELECT 'bulk_' || i::VARCHAR, 'w' || i::VARCHAR FROM range(0, 256) t(i);
+
+query I
+SELECT count(*) FROM testdb.kv WHERE starts_with(key, 'bulk_');
+----
+256
+
+query II
+SELECT * FROM testdb.kv WHERE key = 'bulk_0';
+----
+bulk_0	w0
+
+query II
+SELECT * FROM testdb.kv WHERE key = 'bulk_255';
+----
+bulk_255	w255
+
+# Clean up upsert-test rows so subsequent tests aren't perturbed
+statement ok
+DELETE FROM testdb.kv WHERE key IN ('upsert_key', 'multi_dup', 'reborn');
+
+statement ok
+DELETE FROM testdb.kv WHERE starts_with(key, 'bulk_');
+
 # ===== Filter pushdown tests =====
 
 # Re-insert deleted user for filter tests
