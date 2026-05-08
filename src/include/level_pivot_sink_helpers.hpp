@@ -28,6 +28,21 @@ inline SinkContext GetSinkContext(ExecutionContext &context, TableCatalogEntry &
 	return {lp_table, connection, txn, schema};
 }
 
+struct SinkBatch {
+	LevelPivotTransaction &txn;
+
+	void put(std::string_view key, std::string_view value) {
+		txn.StagePut(key, value);
+	}
+	void del(std::string_view key) {
+		txn.StageDelete(key);
+	}
+};
+
+inline SinkBatch GetSinkBatch(const SinkContext &ctx) {
+	return SinkBatch {ctx.txn};
+}
+
 inline SourceResultType EmitRowCount(GlobalSinkState &sink_state, DataChunk &chunk) {
 	auto &gstate = sink_state.Cast<LevelPivotSinkGlobalState>();
 	chunk.SetCardinality(1);

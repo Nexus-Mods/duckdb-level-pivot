@@ -3,11 +3,15 @@
 #include "level_pivot_utils.hpp"
 #include "key_parser.hpp"
 #include "level_pivot_storage.hpp"
+#include "level_pivot_overlay.hpp"
+#include "level_pivot_catalog.hpp"
+#include "level_pivot_transaction.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include <algorithm>
 
 namespace duckdb {
@@ -31,9 +35,11 @@ struct IdentityMapping {
 };
 
 struct LevelPivotScanLocalState : public LocalTableFunctionState {
-	std::unique_ptr<level_pivot::LevelDBIterator> iterator;
+	std::unique_ptr<level_pivot::MergedIterator> iterator;
+	const level_pivot::TransactionOverlay *overlay = nullptr; // weak, lifetime = txn
 	std::string prefix;
 	bool initialized = false;
+	idx_t point_key_index = 0; // cursor for raw-mode point-lookup path
 
 	// Zero-alloc parse buffers (reused every key)
 	std::string_view captures_buf[level_pivot::MAX_KEY_CAPTURES];
@@ -67,76 +73,185 @@ static void LevelPivotPushdownComplexFilter(ClientContext &context, LogicalGet &
 		return;
 	}
 	auto &scan_data = bind_data->Cast<LevelPivotScanData>();
-	// Always reset prefix - bind_data may be reused across queries via Copy()
+	// Always reset both fields - bind_data may be reused across queries via Copy()
 	scan_data.filter_prefix.clear();
+	scan_data.point_keys.clear();
 	auto *table_entry = scan_data.table_entry;
-	if (!table_entry || table_entry->GetTableMode() != LevelPivotTableMode::PIVOT) {
+	if (!table_entry) {
 		return;
 	}
 
-	auto &parser = table_entry->GetKeyParser();
-	auto &pattern = parser.pattern();
-	auto &capture_names = pattern.capture_names();
+	if (table_entry->GetTableMode() == LevelPivotTableMode::PIVOT) {
+		auto &parser = table_entry->GetKeyParser();
+		auto &pattern = parser.pattern();
+		auto &capture_names = pattern.capture_names();
 
-	// Build a map: column_name -> equality_value from the filter expressions
-	std::unordered_map<std::string, std::string> eq_values;
-	for (idx_t i = 0; i < filters.size(); i++) {
-		auto &filter = filters[i];
-		if (filter->expression_class != ExpressionClass::BOUND_COMPARISON) {
-			continue;
-		}
-		auto &comp = filter->Cast<BoundComparisonExpression>();
-		if (comp.type != ExpressionType::COMPARE_EQUAL) {
-			continue;
+		// Build a map: column_name -> equality_value from the filter expressions
+		std::unordered_map<std::string, std::string> eq_values;
+		for (idx_t i = 0; i < filters.size(); i++) {
+			auto &filter = filters[i];
+			if (filter->expression_class != ExpressionClass::BOUND_COMPARISON) {
+				continue;
+			}
+			auto &comp = filter->Cast<BoundComparisonExpression>();
+			if (comp.type != ExpressionType::COMPARE_EQUAL) {
+				continue;
+			}
+
+			BoundColumnRefExpression *col_ref = nullptr;
+			BoundConstantExpression *const_ref = nullptr;
+
+			if (comp.left->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
+			    comp.right->expression_class == ExpressionClass::BOUND_CONSTANT) {
+				col_ref = &comp.left->Cast<BoundColumnRefExpression>();
+				const_ref = &comp.right->Cast<BoundConstantExpression>();
+			} else if (comp.right->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
+			           comp.left->expression_class == ExpressionClass::BOUND_CONSTANT) {
+				col_ref = &comp.right->Cast<BoundColumnRefExpression>();
+				const_ref = &comp.left->Cast<BoundConstantExpression>();
+			}
+
+			if (!col_ref || !const_ref) {
+				continue;
+			}
+			if (col_ref->binding.table_index != get.table_index) {
+				continue;
+			}
+			if (const_ref->value.IsNull()) {
+				continue;
+			}
+
+			// Map from output position through column_ids to actual table column index
+			auto output_idx = col_ref->binding.column_index;
+			auto &col_ids = get.GetColumnIds();
+			if (output_idx >= col_ids.size()) {
+				continue;
+			}
+			auto table_col_idx = col_ids[output_idx].GetPrimaryIndex();
+			if (table_col_idx < get.names.size()) {
+				eq_values[get.names[table_col_idx]] = const_ref->value.ToString();
+			}
 		}
 
-		BoundColumnRefExpression *col_ref = nullptr;
-		BoundConstantExpression *const_ref = nullptr;
-
-		if (comp.left->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
-		    comp.right->expression_class == ExpressionClass::BOUND_CONSTANT) {
-			col_ref = &comp.left->Cast<BoundColumnRefExpression>();
-			const_ref = &comp.right->Cast<BoundConstantExpression>();
-		} else if (comp.right->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
-		           comp.left->expression_class == ExpressionClass::BOUND_CONSTANT) {
-			col_ref = &comp.right->Cast<BoundColumnRefExpression>();
-			const_ref = &comp.left->Cast<BoundConstantExpression>();
+		// Build prefix from consecutive identity column equality matches
+		std::vector<std::string> capture_values;
+		for (auto &cap_name : capture_names) {
+			auto it = eq_values.find(cap_name);
+			if (it == eq_values.end()) {
+				break;
+			}
+			capture_values.push_back(it->second);
 		}
 
-		if (!col_ref || !const_ref) {
-			continue;
+		if (!capture_values.empty()) {
+			scan_data.filter_prefix = parser.build_prefix(capture_values);
 		}
-		if (col_ref->binding.table_index != get.table_index) {
-			continue;
-		}
-		if (const_ref->value.IsNull()) {
-			continue;
-		}
+	} else {
+		// RAW mode: column 0 is the key column.
+		// Look for `WHERE key = 'X'` and `WHERE key IN ('A', 'B', ...)` filters.
+		auto &columns = table_entry->GetColumns();
+		auto &key_col_name = columns.GetColumn(LogicalIndex(0)).Name();
 
-		// Map from output position through column_ids to actual table column index
-		auto output_idx = col_ref->binding.column_index;
-		auto &col_ids = get.GetColumnIds();
-		if (output_idx >= col_ids.size()) {
-			continue;
-		}
-		auto table_col_idx = col_ids[output_idx].GetPrimaryIndex();
-		if (table_col_idx < get.names.size()) {
-			eq_values[get.names[table_col_idx]] = const_ref->value.ToString();
-		}
-	}
+		for (idx_t i = 0; i < filters.size(); i++) {
+			auto &filter = filters[i];
 
-	// Build prefix from consecutive identity column equality matches
-	std::vector<std::string> capture_values;
-	for (auto &cap_name : capture_names) {
-		auto it = eq_values.find(cap_name);
-		if (it == eq_values.end()) {
-			break;
-		}
-		capture_values.push_back(it->second);
-	}
+			// Equality: `WHERE key = 'X'`
+			if (filter->expression_class == ExpressionClass::BOUND_COMPARISON) {
+				auto &comp = filter->Cast<BoundComparisonExpression>();
+				if (comp.type != ExpressionType::COMPARE_EQUAL) {
+					continue;
+				}
 
-	if (!capture_values.empty()) {
-		scan_data.filter_prefix = parser.build_prefix(capture_values);
+				BoundColumnRefExpression *col_ref = nullptr;
+				BoundConstantExpression *const_ref = nullptr;
+				if (comp.left->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
+				    comp.right->expression_class == ExpressionClass::BOUND_CONSTANT) {
+					col_ref = &comp.left->Cast<BoundColumnRefExpression>();
+					const_ref = &comp.right->Cast<BoundConstantExpression>();
+				} else if (comp.right->expression_class == ExpressionClass::BOUND_COLUMN_REF &&
+				           comp.left->expression_class == ExpressionClass::BOUND_CONSTANT) {
+					col_ref = &comp.right->Cast<BoundColumnRefExpression>();
+					const_ref = &comp.left->Cast<BoundConstantExpression>();
+				}
+				if (!col_ref || !const_ref) {
+					continue;
+				}
+				if (col_ref->binding.table_index != get.table_index) {
+					continue;
+				}
+				if (const_ref->value.IsNull()) {
+					continue;
+				}
+
+				auto output_idx = col_ref->binding.column_index;
+				auto &col_ids = get.GetColumnIds();
+				if (output_idx >= col_ids.size()) {
+					continue;
+				}
+				auto table_col_idx = col_ids[output_idx].GetPrimaryIndex();
+				if (table_col_idx >= get.names.size()) {
+					continue;
+				}
+				if (get.names[table_col_idx] != key_col_name) {
+					continue;
+				}
+
+				scan_data.point_keys.push_back(const_ref->value.ToString());
+				continue;
+			}
+
+			// IN-list: `WHERE key IN ('A','B','C')`
+			// DuckDB models this as a BoundOperatorExpression with type COMPARE_IN.
+			if (filter->expression_class == ExpressionClass::BOUND_OPERATOR) {
+				auto &op = filter->Cast<BoundOperatorExpression>();
+				if (op.type != ExpressionType::COMPARE_IN) {
+					continue;
+				}
+				if (op.children.size() < 2) {
+					continue;
+				}
+
+				// First child is the column ref; remaining children are the values
+				if (op.children[0]->expression_class != ExpressionClass::BOUND_COLUMN_REF) {
+					continue;
+				}
+				auto &col_ref = op.children[0]->Cast<BoundColumnRefExpression>();
+				if (col_ref.binding.table_index != get.table_index) {
+					continue;
+				}
+				auto output_idx = col_ref.binding.column_index;
+				auto &col_ids = get.GetColumnIds();
+				if (output_idx >= col_ids.size()) {
+					continue;
+				}
+				auto table_col_idx = col_ids[output_idx].GetPrimaryIndex();
+				if (table_col_idx >= get.names.size()) {
+					continue;
+				}
+				if (get.names[table_col_idx] != key_col_name) {
+					continue;
+				}
+
+				// Each remaining child must be a constant
+				bool all_constants = true;
+				for (size_t k = 1; k < op.children.size(); k++) {
+					if (op.children[k]->expression_class != ExpressionClass::BOUND_CONSTANT) {
+						all_constants = false;
+						break;
+					}
+				}
+				if (!all_constants) {
+					continue;
+				}
+				for (size_t k = 1; k < op.children.size(); k++) {
+					auto &cv = op.children[k]->Cast<BoundConstantExpression>();
+					if (cv.value.IsNull()) {
+						continue;
+					}
+					scan_data.point_keys.push_back(cv.value.ToString());
+				}
+			}
+		}
 	}
 }
 
@@ -145,10 +260,15 @@ static unique_ptr<GlobalTableFunctionState> LevelPivotInitGlobal(ClientContext &
 	auto result = make_uniq<LevelPivotScanGlobalState>();
 	result->column_ids = input.column_ids;
 
-	// Copy filter prefix from bind_data (set by pushdown_complex_filter during optimization)
+	// Copy filter prefix and point_keys from bind_data (set by pushdown_complex_filter during optimization)
 	if (input.bind_data) {
 		auto &bind_data = input.bind_data->Cast<LevelPivotScanData>();
 		result->filter_prefix = bind_data.filter_prefix;
+		result->point_keys = bind_data.point_keys;
+		// Dedupe so a query like WHERE k IN ('a','a') doesn't emit the row twice.
+		std::sort(result->point_keys.begin(), result->point_keys.end());
+		result->point_keys.erase(std::unique(result->point_keys.begin(), result->point_keys.end()),
+		                         result->point_keys.end());
 	}
 
 	return std::move(result);
@@ -156,7 +276,13 @@ static unique_ptr<GlobalTableFunctionState> LevelPivotInitGlobal(ClientContext &
 
 static unique_ptr<LocalTableFunctionState> LevelPivotInitLocal(ExecutionContext &context, TableFunctionInitInput &input,
                                                                GlobalTableFunctionState *global_state) {
-	return make_uniq<LevelPivotScanLocalState>();
+	auto lstate = make_uniq<LevelPivotScanLocalState>();
+	auto &bind_data = input.bind_data->Cast<LevelPivotScanData>();
+	auto &lp_table = bind_data.table_entry->Cast<LevelPivotTableEntry>();
+	auto &catalog = lp_table.ParentCatalog().Cast<LevelPivotCatalog>();
+	auto &txn = Transaction::Get(context.client, catalog).Cast<LevelPivotTransaction>();
+	lstate->overlay = &txn.Overlay();
+	return lstate;
 }
 
 // Write a string_view directly into a DuckDB output vector (bypasses Value allocation for VARCHAR)
@@ -202,7 +328,7 @@ static void PivotScan(LevelPivotTableEntry &table_entry, LevelPivotScanLocalStat
 	if (!lstate.initialized) {
 		// Use filter-narrowed prefix if available, otherwise use the full table prefix
 		lstate.prefix = gstate.filter_prefix.empty() ? parser.build_prefix() : gstate.filter_prefix;
-		lstate.iterator = std::make_unique<level_pivot::LevelDBIterator>(connection.iterator());
+		lstate.iterator = std::make_unique<level_pivot::MergedIterator>(connection.iterator(), lstate.overlay);
 		if (lstate.prefix.empty()) {
 			lstate.iterator->seek_to_first();
 		} else {
@@ -380,11 +506,72 @@ static void RawScan(LevelPivotTableEntry &table_entry, LevelPivotScanLocalState 
 	auto &columns = table_entry.GetColumns();
 
 	if (!lstate.initialized) {
-		lstate.iterator = std::make_unique<level_pivot::LevelDBIterator>(connection.iterator());
-		lstate.iterator->seek_to_first();
 		lstate.initialized = true;
+		// Only create the iterator if we're not doing point-lookups
+		if (gstate.point_keys.empty()) {
+			lstate.iterator = std::make_unique<level_pivot::MergedIterator>(connection.iterator(), lstate.overlay);
+			lstate.iterator->seek_to_first();
+		}
 	}
 
+	// Point-lookup mode: bypass iterator entirely
+	if (!gstate.point_keys.empty()) {
+		auto &val_col_type = columns.GetColumn(LogicalIndex(1)).Type();
+		auto &key_col_type = columns.GetColumn(LogicalIndex(0)).Type();
+		bool val_is_json = table_entry.IsJsonColumn(1);
+		idx_t count = 0;
+		while (count < STANDARD_VECTOR_SIZE && lstate.point_key_index < gstate.point_keys.size()) {
+			const std::string &key = gstate.point_keys[lstate.point_key_index++];
+
+			// Overlay-aware lookup: check overlay first; on absent, hit LevelDB
+			std::string_view value_sv;
+			std::string value_storage; // backs value_sv when reading from LevelDB
+			bool found = false;
+
+			if (lstate.overlay) {
+				auto kind = lstate.overlay->lookup(key, &value_sv);
+				if (kind == level_pivot::TransactionOverlay::Lookup::kPut) {
+					found = true;
+				} else if (kind == level_pivot::TransactionOverlay::Lookup::kTombstone) {
+					continue; // deleted in this txn → not visible
+				}
+			}
+			if (!found) {
+				auto opt = connection.get(key);
+				if (!opt) {
+					continue;
+				}
+				value_storage = std::move(*opt);
+				value_sv = std::string_view(value_storage.data(), value_storage.size());
+				found = true;
+			}
+
+			// Emit row using column-id resolution logic
+			for (idx_t i = 0; i < column_ids.size(); i++) {
+				auto col_idx = column_ids[i];
+				if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
+					continue;
+				}
+				if (col_idx >= LEVEL_PIVOT_VIRTUAL_COL_BASE) {
+					col_idx = col_idx - LEVEL_PIVOT_VIRTUAL_COL_BASE;
+				}
+				if (col_idx == 0) {
+					WriteValueDirect(output.data[i], count, std::string_view(key), key_col_type);
+				} else if (col_idx == 1) {
+					WriteValueDirect(output.data[i], count, value_sv, val_col_type, val_is_json);
+				}
+			}
+			count++;
+		}
+
+		if (lstate.point_key_index >= gstate.point_keys.size()) {
+			gstate.done = true;
+		}
+		output.SetCardinality(count);
+		return;
+	}
+
+	// Iterator-based full scan
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE && lstate.iterator && lstate.iterator->valid()) {
 		std::string_view key_sv = lstate.iterator->key_view();

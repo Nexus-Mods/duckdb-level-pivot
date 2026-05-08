@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <atomic>
 
 namespace leveldb {
 class DB;
@@ -67,13 +68,16 @@ public:
 	void del(std::string_view key);
 	void commit();
 	void discard();
-	size_t pending_count() const;
+	size_t pending_count() const {
+		return put_count_ + del_count_;
+	}
 	bool has_pending() const;
 
 private:
 	LevelDBConnection *connection_;
 	std::unique_ptr<leveldb::WriteBatch> batch_;
-	size_t pending_count_ = 0;
+	size_t put_count_ = 0;
+	size_t del_count_ = 0;
 	bool committed_ = false;
 };
 
@@ -101,10 +105,34 @@ public:
 		return db_;
 	}
 
+	uint64_t total_writes() const {
+		return total_writes_.load(std::memory_order_relaxed);
+	}
+	uint64_t total_puts() const {
+		return total_puts_.load(std::memory_order_relaxed);
+	}
+	uint64_t total_deletes() const {
+		return total_deletes_.load(std::memory_order_relaxed);
+	}
+
+	// Internal: only LevelDBWriteBatch and the put/del helpers should call these.
+	void note_write() {
+		total_writes_.fetch_add(1, std::memory_order_relaxed);
+	}
+	void note_puts(uint64_t n) {
+		total_puts_.fetch_add(n, std::memory_order_relaxed);
+	}
+	void note_deletes(uint64_t n) {
+		total_deletes_.fetch_add(n, std::memory_order_relaxed);
+	}
+
 private:
 	leveldb::DB *db_ = nullptr;
 	std::string path_;
 	bool read_only_;
+	std::atomic<uint64_t> total_writes_ {0};
+	std::atomic<uint64_t> total_puts_ {0};
+	std::atomic<uint64_t> total_deletes_ {0};
 
 	void check_write_allowed();
 };

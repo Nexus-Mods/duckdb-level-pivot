@@ -4,6 +4,7 @@
 #include "level_pivot_catalog.hpp"
 #include "level_pivot_transaction.hpp"
 #include "level_pivot_storage.hpp"
+#include "level_pivot_stats.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/storage/storage_extension.hpp"
@@ -72,6 +73,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetCreateTableFunction());
 	loader.RegisterFunction(GetDropTableFunction());
 	loader.RegisterFunction(GetDirtyTablesFunction());
+	loader.RegisterFunction(GetStatsFunctionSet());
 }
 
 void LevelPivotExtension::Load(ExtensionLoader &loader) {

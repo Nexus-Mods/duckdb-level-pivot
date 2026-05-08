@@ -5,11 +5,36 @@ namespace level_pivot {
 
 KeyParser::KeyParser(const KeyPattern &pattern) : pattern_(pattern) {
 	compute_estimated_key_size();
+	// After AttrSegment, capture all literal text that follows for fast key construction.
+	attr_tail_.clear();
+	bool past_attr = false;
+	for (const auto &segment : pattern_.segments()) {
+		if (past_attr) {
+			if (std::holds_alternative<LiteralSegment>(segment)) {
+				attr_tail_ += std::get<LiteralSegment>(segment).text;
+			}
+			// CaptureSegment after AttrSegment is unsupported; intentionally not handled.
+		} else if (std::holds_alternative<AttrSegment>(segment)) {
+			past_attr = true;
+		}
+	}
 	try_init_simd_parser();
 }
 
 KeyParser::KeyParser(const std::string &pattern) : pattern_(pattern) {
 	compute_estimated_key_size();
+	// After AttrSegment, capture all literal text that follows for fast key construction.
+	attr_tail_.clear();
+	bool past_attr = false;
+	for (const auto &segment : pattern_.segments()) {
+		if (past_attr) {
+			if (std::holds_alternative<LiteralSegment>(segment)) {
+				attr_tail_ += std::get<LiteralSegment>(segment).text;
+			}
+		} else if (std::holds_alternative<AttrSegment>(segment)) {
+			past_attr = true;
+		}
+	}
 	try_init_simd_parser();
 }
 
@@ -213,6 +238,29 @@ std::string KeyParser::build_prefix(const std::vector<std::string> &capture_valu
 	}
 
 	return result;
+}
+
+void KeyParser::build_identity_prefix_with_delim_into(std::string &out,
+                                                      const std::vector<std::string> &capture_values) const {
+	if (capture_values.size() != pattern_.capture_count()) {
+		throw std::invalid_argument("Expected " + std::to_string(pattern_.capture_count()) + " capture values, got " +
+		                            std::to_string(capture_values.size()));
+	}
+	size_t capture_idx = 0;
+	for (const auto &segment : pattern_.segments()) {
+		if (std::holds_alternative<LiteralSegment>(segment)) {
+			out += std::get<LiteralSegment>(segment).text;
+		} else if (std::holds_alternative<CaptureSegment>(segment)) {
+			if (capture_values[capture_idx].empty()) {
+				throw std::invalid_argument("Capture value for '" + std::get<CaptureSegment>(segment).name +
+				                            "' cannot be empty");
+			}
+			out += capture_values[capture_idx];
+			++capture_idx;
+		} else if (std::holds_alternative<AttrSegment>(segment)) {
+			break; // stop here — caller appends attr name + attr_tail()
+		}
+	}
 }
 
 std::optional<std::string> KeyParser::try_get_uniform_delimiter() const {

@@ -2,6 +2,7 @@
 #include "key_parser.hpp"
 #include "level_pivot_sink_helpers.hpp"
 #include "level_pivot_utils.hpp"
+#include "level_pivot_overlay.hpp"
 
 namespace duckdb {
 
@@ -17,11 +18,13 @@ unique_ptr<GlobalSinkState> LevelPivotDelete::GetGlobalSinkState(ClientContext &
 SinkResultType LevelPivotDelete::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &gstate = input.global_state.Cast<LevelPivotSinkGlobalState>();
 	auto ctx = GetSinkContext(context, table);
+	ctx.txn.MarkTableDirty(ctx.table.name);
 
 	if (ctx.table.GetTableMode() == LevelPivotTableMode::PIVOT) {
 		auto &parser = ctx.table.GetKeyParser();
-		auto batch = ctx.connection.create_batch();
-		auto iter = ctx.connection.iterator();
+		auto batch = GetSinkBatch(ctx);
+		auto base_iter = ctx.connection.iterator();
+		level_pivot::MergedIterator iter(std::move(base_iter), &ctx.txn.Overlay());
 
 		std::vector<std::string> identity_values;
 		identity_values.reserve(chunk.ColumnCount());
@@ -58,19 +61,37 @@ SinkResultType LevelPivotDelete::Sink(ExecutionContext &context, DataChunk &chun
 			}
 		}
 
-		batch.commit();
 		gstate.row_count += chunk.size();
 	} else {
-		auto batch = ctx.connection.create_batch();
-		for (idx_t row = 0; row < chunk.size(); row++) {
-			auto key_val = chunk.data[0].GetValue(row);
-			if (!key_val.IsNull()) {
-				auto key = key_val.ToString();
+		auto &key_col_type = ctx.table.GetColumns().GetColumn(LogicalIndex(0)).Type();
+		bool key_is_varchar = key_col_type.id() == LogicalTypeId::VARCHAR;
+		auto batch = GetSinkBatch(ctx);
+
+		if (key_is_varchar) {
+			// Fast path: UnifiedVectorFormat avoids per-cell Value allocation
+			UnifiedVectorFormat key_fmt;
+			chunk.data[0].ToUnifiedFormat(chunk.size(), key_fmt);
+			auto keys = UnifiedVectorFormat::GetData<string_t>(key_fmt);
+			for (idx_t row = 0; row < chunk.size(); row++) {
+				auto kidx = key_fmt.sel->get_index(row);
+				if (!key_fmt.validity.RowIsValid(kidx)) {
+					continue;
+				}
+				std::string_view key(keys[kidx].GetData(), keys[kidx].GetSize());
 				batch.del(key);
 				ctx.txn.CheckKeyAgainstTables(key, ctx.schema);
 			}
+		} else {
+			// Slow path: non-VARCHAR key column goes through Value::GetValue
+			for (idx_t row = 0; row < chunk.size(); row++) {
+				auto key_val = chunk.data[0].GetValue(row);
+				if (!key_val.IsNull()) {
+					auto key = key_val.ToString();
+					batch.del(key);
+					ctx.txn.CheckKeyAgainstTables(key, ctx.schema);
+				}
+			}
 		}
-		batch.commit();
 		gstate.row_count += chunk.size();
 	}
 

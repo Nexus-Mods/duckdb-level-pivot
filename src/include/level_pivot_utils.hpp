@@ -62,21 +62,55 @@ inline Value JsonStringToTypedValue(std::string_view str_value, const LogicalTyp
 	return result;
 }
 
+// Escapes a UTF-8 string into a JSON string literal: prepends ", appends ", and
+// escapes the JSON-mandatory characters and C0 control characters.
+inline void AppendJsonString(std::string &out, std::string_view s) {
+	out.push_back('"');
+	for (char c : s) {
+		switch (c) {
+		case '"':
+			out.append("\\\"");
+			break;
+		case '\\':
+			out.append("\\\\");
+			break;
+		case '\b':
+			out.append("\\b");
+			break;
+		case '\f':
+			out.append("\\f");
+			break;
+		case '\n':
+			out.append("\\n");
+			break;
+		case '\r':
+			out.append("\\r");
+			break;
+		case '\t':
+			out.append("\\t");
+			break;
+		default:
+			if (static_cast<unsigned char>(c) < 0x20) {
+				char buf[8];
+				snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+				out.append(buf);
+			} else {
+				out.push_back(c);
+			}
+		}
+	}
+	out.push_back('"');
+}
+
 // Serialize a DuckDB Value into a JSON-encoded string for LevelDB storage.
 // VARCHAR values get JSON string quoting/escaping. Numeric/boolean types use ToString() (already valid JSON).
 inline std::string TypedValueToJsonString(const Value &val, const LogicalType &type) {
 	if (type.id() == LogicalTypeId::VARCHAR) {
 		auto str = val.ToString();
-		auto *doc = duckdb_yyjson::yyjson_mut_doc_new(nullptr);
-		auto *root = duckdb_yyjson::yyjson_mut_strncpy(doc, str.data(), str.size());
-		duckdb_yyjson::yyjson_mut_doc_set_root(doc, root);
-
-		size_t json_len = 0;
-		char *json_str = duckdb_yyjson::yyjson_mut_write(doc, 0, &json_len);
-		std::string result(json_str, json_len);
-		free(json_str);
-		duckdb_yyjson::yyjson_mut_doc_free(doc);
-		return result;
+		std::string out;
+		out.reserve(str.size() + 2);
+		AppendJsonString(out, str);
+		return out;
 	}
 
 	return val.ToString();

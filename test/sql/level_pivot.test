@@ -516,6 +516,66 @@ SELECT * FROM testdb.json_tbl WHERE id = 'u3';
 ----
 u3	Charlie	NULL
 
+# Round-trip values that exercise every branch of AppendJsonString
+# (Phase 6 replaced yyjson_mut_write with a hand-rolled escape table).
+
+# Backslash → escaped as \\
+statement ok
+INSERT INTO testdb.json_tbl VALUES ('s_bs', e'back\\slash', 1);
+
+query I
+SELECT name FROM testdb.json_tbl WHERE id = 's_bs';
+----
+back\slash
+
+query I
+SELECT value FROM testdb.raw_check WHERE key = 'json_tbl##s_bs##name';
+----
+"back\\slash"
+
+# Newline → escaped as \n. Sqllogictest can't represent embedded newlines in
+# expected output, so verify via length and substring.
+statement ok
+INSERT INTO testdb.json_tbl VALUES ('s_nl', e'line1\nline2', 2);
+
+query III
+SELECT length(name), substr(name, 1, 5), substr(name, 7, 5) FROM testdb.json_tbl WHERE id = 's_nl';
+----
+11	line1	line2
+
+query I
+SELECT value FROM testdb.raw_check WHERE key = 'json_tbl##s_nl##name';
+----
+"line1\nline2"
+
+# C0 control character (\x01) → escaped as \u0001
+statement ok
+INSERT INTO testdb.json_tbl VALUES ('s_ctl', chr(1), 3);
+
+query II
+SELECT length(name), ascii(name) FROM testdb.json_tbl WHERE id = 's_ctl';
+----
+1	1
+
+query I
+SELECT value FROM testdb.raw_check WHERE key = 'json_tbl##s_ctl##name';
+----
+"\u0001"
+
+# Non-ASCII Unicode → passes through unescaped (matches yyjson behaviour)
+statement ok
+INSERT INTO testdb.json_tbl VALUES ('s_uni', 'café', 4);
+
+query I
+SELECT name FROM testdb.json_tbl WHERE id = 's_uni';
+----
+café
+
+query I
+SELECT value FROM testdb.raw_check WHERE key = 'json_tbl##s_uni##name';
+----
+"café"
+
 # Error: identity column with JSON prefix should fail
 statement error
 CALL level_pivot_create_table('testdb', 'bad_json', 'bad##{id}##{attr}', ['id', 'val'], column_types := ['JSON VARCHAR', 'VARCHAR']);
@@ -631,11 +691,6 @@ testdb	kv2	raw
 
 statement ok
 ROLLBACK;
-
-# Clean up residual data from dirty tracking tests
-# (LevelDB writes persist through DuckDB ROLLBACK since LevelDB has no transactions)
-statement ok
-DELETE FROM testdb.users WHERE "group" = 'dirty_test';
 
 statement ok
 CALL level_pivot_drop_table('testdb', 'kv2');

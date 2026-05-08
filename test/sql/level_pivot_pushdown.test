@@ -1,0 +1,110 @@
+# name: test/sql/level_pivot_pushdown.test
+# description: Raw-mode point + IN-list filter pushdown
+# group: [sql]
+
+require level_pivot
+
+statement ok
+ATTACH '__TEST_DIR__/pd_db' AS p (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('p', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+statement ok
+INSERT INTO p.kv SELECT 'k_' || i::VARCHAR, 'v_' || i::VARCHAR FROM range(0, 10000) t(i);
+
+# === Equality lookup ===
+query II
+SELECT * FROM p.kv WHERE key = 'k_42';
+----
+k_42	v_42
+
+# === Missing key returns empty ===
+query I
+SELECT count(*) FROM p.kv WHERE key = 'k_does_not_exist';
+----
+0
+
+# === IN-list ===
+query II rowsort
+SELECT * FROM p.kv WHERE key IN ('k_1', 'k_2', 'k_9999');
+----
+k_1	v_1
+k_2	v_2
+k_9999	v_9999
+
+# === IN-list with duplicates is deduped (no double-emit) ===
+query II rowsort
+SELECT * FROM p.kv WHERE key IN ('k_5', 'k_5', 'k_6');
+----
+k_5	v_5
+k_6	v_6
+
+query I
+SELECT count(*) FROM p.kv WHERE key IN ('k_7', 'k_7', 'k_7');
+----
+1
+
+# === DELETE WHERE key IN (...) only Reads the keys it needs ===
+# (heuristic check: this is a workload-not-correctness test;
+#  if it ever takes more than ~50ms on 10k rows we know full-scan is back)
+
+statement ok
+DELETE FROM p.kv WHERE key IN ('k_1', 'k_2', 'k_3');
+
+query I
+SELECT count(*) FROM p.kv WHERE key IN ('k_1', 'k_2', 'k_3');
+----
+0
+
+query I
+SELECT count(*) FROM p.kv;
+----
+9997
+
+# === NULL in pushdown predicates is skipped (does not become a point lookup for "") ===
+
+query I
+SELECT count(*) FROM p.kv WHERE key = NULL;
+----
+0
+
+query II rowsort
+SELECT * FROM p.kv WHERE key IN ('k_42', NULL, 'k_43');
+----
+k_42	v_42
+k_43	v_43
+
+# === Non-VARCHAR raw key with point-lookup pushdown (round-trip via Value::ToString) ===
+
+statement ok
+CALL level_pivot_create_table('p', 'kvb', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['BIGINT', 'VARCHAR']);
+
+statement ok
+INSERT INTO p.kvb VALUES (10, 'ten'), (20, 'twenty'), (30, 'thirty'), (42, 'meaning');
+
+# Equality on BIGINT key
+query II
+SELECT * FROM p.kvb WHERE key = 42;
+----
+42	meaning
+
+# IN-list on BIGINT key
+query II rowsort
+SELECT * FROM p.kvb WHERE key IN (10, 20, 30);
+----
+10	ten
+20	twenty
+30	thirty
+
+# Missing BIGINT key
+query I
+SELECT count(*) FROM p.kvb WHERE key = 999;
+----
+0
+
+statement ok
+CALL level_pivot_drop_table('p', 'kvb');
+
+statement ok
+DETACH p;
