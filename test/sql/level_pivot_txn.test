@@ -1,0 +1,426 @@
+# name: test/sql/level_pivot_txn.test
+# description: Transaction & durability semantics for level_pivot
+# group: [sql]
+
+require level_pivot
+
+statement ok
+ATTACH '__TEST_DIR__/txn_db' AS t (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('t', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+statement ok
+CALL level_pivot_create_table('t', 'users', 'users##{group}##{id}##{attr}', ['group', 'id', 'name', 'email']);
+
+# === Auto-commit durability (raw) ===
+statement ok
+INSERT INTO t.kv VALUES ('persist_raw', 'v1');
+
+statement ok
+DETACH t;
+
+statement ok
+ATTACH '__TEST_DIR__/txn_db' AS t (TYPE level_pivot, READ_ONLY false);
+
+statement ok
+CALL level_pivot_create_table('t', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+statement ok
+CALL level_pivot_create_table('t', 'users', 'users##{group}##{id}##{attr}', ['group', 'id', 'name', 'email']);
+
+query II
+SELECT * FROM t.kv WHERE key = 'persist_raw';
+----
+persist_raw	v1
+
+# === Auto-commit durability (pivot) ===
+statement ok
+INSERT INTO t.users VALUES ('admins', 'u1', 'Alice', 'a@x.com');
+
+statement ok
+DETACH t;
+
+statement ok
+ATTACH '__TEST_DIR__/txn_db' AS t (TYPE level_pivot, READ_ONLY false);
+
+statement ok
+CALL level_pivot_create_table('t', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+statement ok
+CALL level_pivot_create_table('t', 'users', 'users##{group}##{id}##{attr}', ['group', 'id', 'name', 'email']);
+
+query IIII
+SELECT * FROM t.users WHERE "group" = 'admins' AND id = 'u1';
+----
+admins	u1	Alice	a@x.com
+
+# === Multi-row INSERT in one statement is atomic-within-itself ===
+# (Already tested in level_pivot.test for raw upsert; we add the pivot equivalent
+#  and a stats assertion: 1 LevelDB Write per multi-row statement.)
+
+# Capture write count before
+statement ok
+CREATE OR REPLACE TEMP TABLE _wc AS SELECT total_writes FROM level_pivot_stats('t');
+
+statement ok
+INSERT INTO t.users VALUES ('e','u1','D','d@x'), ('e','u2','E','e@x'), ('e','u3','F','f@x');
+
+# 3 rows × 2 attrs each = 6 puts, but ONE Write (regression guard)
+query I
+SELECT total_writes - (SELECT total_writes FROM _wc) FROM level_pivot_stats('t');
+----
+1
+
+query IIII rowsort
+SELECT * FROM t.users WHERE "group" = 'e';
+----
+e	u1	D	d@x
+e	u2	E	e@x
+e	u3	F	f@x
+
+# === Raw upsert overwrites: re-INSERT same key replaces, single Write ===
+statement ok
+INSERT INTO t.kv VALUES ('upk', 'v1');
+
+statement ok
+CREATE OR REPLACE TEMP TABLE _wc AS SELECT total_writes FROM level_pivot_stats('t');
+
+statement ok
+INSERT INTO t.kv VALUES ('upk', 'v2');
+
+query II
+SELECT * FROM t.kv WHERE key = 'upk';
+----
+upk	v2
+
+query I
+SELECT total_writes - (SELECT total_writes FROM _wc) FROM level_pivot_stats('t');
+----
+1
+
+# === ROLLBACK actually rolls back (this fails today; fixed by Phase 3) ===
+
+statement ok
+DELETE FROM t.kv WHERE key LIKE 'rb_%';
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO t.kv VALUES ('rb_1', 'v');
+
+statement ok
+INSERT INTO t.kv VALUES ('rb_2', 'v');
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM t.kv WHERE key LIKE 'rb_%';
+----
+0
+
+# === ROLLBACK undoes UPDATE ===
+statement ok
+INSERT INTO t.kv VALUES ('upd_rb', 'before');
+
+statement ok
+BEGIN;
+
+statement ok
+UPDATE t.kv SET value = 'after' WHERE key = 'upd_rb';
+
+statement ok
+ROLLBACK;
+
+query II
+SELECT * FROM t.kv WHERE key = 'upd_rb';
+----
+upd_rb	before
+
+# === ROLLBACK undoes DELETE ===
+statement ok
+INSERT INTO t.kv VALUES ('del_rb', 'still_here');
+
+statement ok
+BEGIN;
+
+statement ok
+DELETE FROM t.kv WHERE key = 'del_rb';
+
+statement ok
+ROLLBACK;
+
+query II
+SELECT * FROM t.kv WHERE key = 'del_rb';
+----
+del_rb	still_here
+
+# === Read-your-own-writes ===
+
+statement ok
+DELETE FROM t.kv WHERE key LIKE 'rmw_%';
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO t.kv VALUES ('rmw_1', 'v1');
+
+# Within the txn, we should see what we just wrote
+query II
+SELECT * FROM t.kv WHERE key = 'rmw_1';
+----
+rmw_1	v1
+
+statement ok
+UPDATE t.kv SET value = 'v2' WHERE key = 'rmw_1';
+
+query II
+SELECT * FROM t.kv WHERE key = 'rmw_1';
+----
+rmw_1	v2
+
+# Insert + delete within same txn → not visible
+statement ok
+INSERT INTO t.kv VALUES ('rmw_doomed', 'x');
+
+statement ok
+DELETE FROM t.kv WHERE key = 'rmw_doomed';
+
+query I
+SELECT count(*) FROM t.kv WHERE key = 'rmw_doomed';
+----
+0
+
+statement ok
+COMMIT;
+
+# After commit: rmw_1 = 'v2', rmw_doomed gone
+query II
+SELECT * FROM t.kv WHERE key = 'rmw_1';
+----
+rmw_1	v2
+
+query I
+SELECT count(*) FROM t.kv WHERE key = 'rmw_doomed';
+----
+0
+
+# === Headline batching assertion (this fails today; fixed by Phase 3) ===
+
+statement ok
+DELETE FROM t.kv WHERE key LIKE 'b_%';
+
+statement ok
+CREATE OR REPLACE TEMP TABLE _wc AS SELECT total_writes FROM level_pivot_stats('t');
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO t.kv VALUES ('b_1', '1');
+
+statement ok
+INSERT INTO t.kv VALUES ('b_2', '2');
+
+statement ok
+INSERT INTO t.kv VALUES ('b_3', '3');
+
+statement ok
+INSERT INTO t.kv VALUES ('b_4', '4');
+
+statement ok
+INSERT INTO t.kv VALUES ('b_5', '5');
+
+statement ok
+COMMIT;
+
+# Five INSERT statements + one transaction = ONE LevelDB Write
+query I
+SELECT total_writes - (SELECT total_writes FROM _wc) FROM level_pivot_stats('t');
+----
+1
+
+query I
+SELECT count(*) FROM t.kv WHERE key LIKE 'b_%';
+----
+5
+
+# === ROLLBACK does zero LevelDB Writes (other than the snapshot itself) ===
+
+statement ok
+CREATE OR REPLACE TEMP TABLE _wc AS SELECT total_writes FROM level_pivot_stats('t');
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO t.kv VALUES ('rbz_1', 'x');
+
+statement ok
+INSERT INTO t.kv VALUES ('rbz_2', 'x');
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT total_writes - (SELECT total_writes FROM _wc) FROM level_pivot_stats('t');
+----
+0
+
+# === Mid-txn error → COMMIT becomes implicit ROLLBACK (DuckDB-level guarantee) ===
+
+statement ok
+DELETE FROM t.users WHERE "group" = 'mid_err';
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO t.users VALUES ('mid_err', 'u1', 'A', 'a@x');
+
+# NULL identity → throws InvalidInputException from the Sink
+statement error
+INSERT INTO t.users VALUES (NULL, 'u2', 'B', 'b@x');
+----
+Cannot insert NULL into identity column
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM t.users WHERE "group" = 'mid_err';
+----
+0
+
+# === Empty transactions are free ===
+
+statement ok
+CREATE OR REPLACE TEMP TABLE _wc AS SELECT total_writes FROM level_pivot_stats('t');
+
+statement ok
+BEGIN;
+
+statement ok
+COMMIT;
+
+statement ok
+BEGIN;
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT total_writes - (SELECT total_writes FROM _wc) FROM level_pivot_stats('t');
+----
+0
+
+# === Pivot read-your-own-writes ===
+
+statement ok
+DELETE FROM t.users WHERE "group" = 'rmw_pivot';
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO t.users VALUES ('rmw_pivot', 'p1', 'name1', 'e1@x');
+
+# Inside the txn, the pivot scan must see the freshly inserted row (overlay-aware MergedIterator)
+query IIII
+SELECT * FROM t.users WHERE "group" = 'rmw_pivot' AND id = 'p1';
+----
+rmw_pivot	p1	name1	e1@x
+
+statement ok
+UPDATE t.users SET email = 'e2@x' WHERE "group" = 'rmw_pivot' AND id = 'p1';
+
+# UPDATE visible inside the same txn
+query IIII
+SELECT * FROM t.users WHERE "group" = 'rmw_pivot' AND id = 'p1';
+----
+rmw_pivot	p1	name1	e2@x
+
+# UPDATE-to-NULL on every attr → row vanishes mid-txn (no LevelDB key remains)
+statement ok
+UPDATE t.users SET name = NULL, email = NULL WHERE "group" = 'rmw_pivot' AND id = 'p1';
+
+query I
+SELECT count(*) FROM t.users WHERE "group" = 'rmw_pivot' AND id = 'p1';
+----
+0
+
+statement ok
+COMMIT;
+
+# Still gone after COMMIT
+query I
+SELECT count(*) FROM t.users WHERE "group" = 'rmw_pivot';
+----
+0
+
+# === Pivot DELETE of row inserted in same txn (the case MergedIterator in delete.cpp was added for) ===
+
+statement ok
+DELETE FROM t.users WHERE "group" = 'fresh_del';
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO t.users VALUES ('fresh_del', 'fd1', 'Fresh', 'f@x');
+
+# DELETE must find the row via overlay-aware iterator and remove it
+statement ok
+DELETE FROM t.users WHERE "group" = 'fresh_del' AND id = 'fd1';
+
+query I
+SELECT count(*) FROM t.users WHERE "group" = 'fresh_del';
+----
+0
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*) FROM t.users WHERE "group" = 'fresh_del';
+----
+0
+
+# === Counter splitting (puts vs deletes) within one transaction ===
+
+statement ok
+DELETE FROM t.kv WHERE key LIKE 'cs_%';
+
+statement ok
+CREATE OR REPLACE TEMP TABLE _wc AS SELECT total_writes, total_puts, total_deletes FROM level_pivot_stats('t');
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO t.kv VALUES ('cs_1', 'v1');
+
+statement ok
+INSERT INTO t.kv VALUES ('cs_2', 'v2');
+
+statement ok
+UPDATE t.kv SET value = 'v1_updated' WHERE key = 'cs_1';
+
+statement ok
+DELETE FROM t.kv WHERE key = 'cs_2';
+
+statement ok
+COMMIT;
+
+# Expected: 1 LevelDB Write, 3 puts (2 INSERT + 1 UPDATE), 1 delete
+query III
+SELECT
+  total_writes - (SELECT total_writes FROM _wc),
+  total_puts - (SELECT total_puts FROM _wc),
+  total_deletes - (SELECT total_deletes FROM _wc)
+FROM level_pivot_stats('t');
+----
+1	3	1

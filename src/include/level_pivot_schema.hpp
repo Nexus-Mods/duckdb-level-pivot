@@ -18,6 +18,9 @@ public:
 	void AddTable(unique_ptr<LevelPivotTableEntry> table);
 	void DropTable(const string &name);
 	optional_ptr<LevelPivotTableEntry> GetTable(const string &name);
+	size_t TableCount() const {
+		return tables_.size();
+	}
 
 	// --- SchemaCatalogEntry interface ---
 	optional_ptr<CatalogEntry> CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) override;

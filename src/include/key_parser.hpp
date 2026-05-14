@@ -41,9 +41,19 @@ public:
 	std::string build_prefix() const;
 	std::string build_prefix(const std::vector<std::string> &capture_values) const;
 
+	// Builds the prefix-up-to-attr-segment into `out` (assumed empty or to be cleared).
+	// Returns nothing; caller appends attr_name + attr_tail() to complete the key.
+	void build_identity_prefix_with_delim_into(std::string &out, const std::vector<std::string> &capture_values) const;
+
+	// Returns the literal text immediately following the AttrSegment (often empty).
+	const std::string &attr_tail() const {
+		return attr_tail_;
+	}
+
 private:
 	KeyPattern pattern_;
 	size_t estimated_key_size_;
+	std::string attr_tail_;
 
 	// SIMD parser for uniform delimiter patterns (optional)
 	std::unique_ptr<SimdKeyParser> simd_parser_;

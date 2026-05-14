@@ -72,10 +72,11 @@ LevelDBWriteBatch::~LevelDBWriteBatch() {
 }
 
 LevelDBWriteBatch::LevelDBWriteBatch(LevelDBWriteBatch &&other) noexcept
-    : connection_(other.connection_), batch_(std::move(other.batch_)), pending_count_(other.pending_count_),
-      committed_(other.committed_) {
+    : connection_(other.connection_), batch_(std::move(other.batch_)), put_count_(other.put_count_),
+      del_count_(other.del_count_), committed_(other.committed_) {
 	other.connection_ = nullptr;
-	other.pending_count_ = 0;
+	other.put_count_ = 0;
+	other.del_count_ = 0;
 	other.committed_ = true;
 }
 
@@ -86,10 +87,12 @@ LevelDBWriteBatch &LevelDBWriteBatch::operator=(LevelDBWriteBatch &&other) noexc
 		}
 		connection_ = other.connection_;
 		batch_ = std::move(other.batch_);
-		pending_count_ = other.pending_count_;
+		put_count_ = other.put_count_;
+		del_count_ = other.del_count_;
 		committed_ = other.committed_;
 		other.connection_ = nullptr;
-		other.pending_count_ = 0;
+		other.put_count_ = 0;
+		other.del_count_ = 0;
 		other.committed_ = true;
 	}
 	return *this;
@@ -97,44 +100,45 @@ LevelDBWriteBatch &LevelDBWriteBatch::operator=(LevelDBWriteBatch &&other) noexc
 
 void LevelDBWriteBatch::put(std::string_view key, std::string_view value) {
 	batch_->Put(leveldb::Slice(key.data(), key.size()), leveldb::Slice(value.data(), value.size()));
-	++pending_count_;
+	++put_count_;
 }
 
 void LevelDBWriteBatch::del(std::string_view key) {
 	batch_->Delete(leveldb::Slice(key.data(), key.size()));
-	++pending_count_;
+	++del_count_;
 }
 
 void LevelDBWriteBatch::commit() {
 	if (committed_) {
 		return;
 	}
-	if (connection_ && batch_ && pending_count_ > 0) {
+	if (connection_ && batch_ && (put_count_ + del_count_) > 0) {
 		leveldb::WriteOptions options;
 		options.sync = false;
 		leveldb::Status status = connection_->raw()->Write(options, batch_.get());
 		if (!status.ok()) {
 			throw LevelDBError("WriteBatch commit failed: " + status.ToString());
 		}
+		connection_->note_write();
+		connection_->note_puts(put_count_);
+		connection_->note_deletes(del_count_);
 	}
 	committed_ = true;
-	pending_count_ = 0;
+	put_count_ = 0;
+	del_count_ = 0;
 }
 
 void LevelDBWriteBatch::discard() {
 	if (batch_) {
 		batch_->Clear();
 	}
-	pending_count_ = 0;
+	put_count_ = 0;
+	del_count_ = 0;
 	committed_ = true;
 }
 
-size_t LevelDBWriteBatch::pending_count() const {
-	return pending_count_;
-}
-
 bool LevelDBWriteBatch::has_pending() const {
-	return pending_count_ > 0;
+	return (put_count_ + del_count_) > 0;
 }
 
 // --- LevelDBConnection ---
@@ -181,6 +185,8 @@ void LevelDBConnection::put(std::string_view key, std::string_view value) {
 	if (!status.ok()) {
 		throw LevelDBError("Put failed for key '" + std::string(key) + "': " + status.ToString());
 	}
+	total_writes_.fetch_add(1, std::memory_order_relaxed);
+	total_puts_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void LevelDBConnection::del(std::string_view key) {
@@ -191,6 +197,8 @@ void LevelDBConnection::del(std::string_view key) {
 	if (!status.ok()) {
 		throw LevelDBError("Delete failed for key '" + std::string(key) + "': " + status.ToString());
 	}
+	total_writes_.fetch_add(1, std::memory_order_relaxed);
+	total_deletes_.fetch_add(1, std::memory_order_relaxed);
 }
 
 LevelDBIterator LevelDBConnection::iterator() {
