@@ -1,0 +1,113 @@
+# name: test/sql/level_pivot_concurrency.test
+# description: Concurrent transactions across multiple connections must not corrupt or crash
+# group: [sql]
+#
+# LevelPivotTransactionManager used to keep a single `current_transaction` slot.
+# DuckDB starts a transaction for EVERY statement (including SELECT), so a second
+# connection's query overwrote that slot and destroyed the first connection's
+# transaction while it was still in use, and Commit/Rollback acted on whatever was
+# "current" rather than the transaction passed in. With two connections to the same
+# database (e.g. one writing while another reads), this crashed the process.
+#
+# These tests must hold now that each connection owns its own transaction.
+
+require level_pivot
+
+statement ok
+ATTACH '__TEST_DIR__/concurrency_db' AS t (TYPE level_pivot, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('t', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+# ---------------------------------------------------------------------------
+# 1) Deterministic two-connection interleave (the precise use-after-free path)
+# ---------------------------------------------------------------------------
+
+# con1 opens an explicit write transaction -> becomes the single current_transaction
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO t.kv VALUES ('a', '1')
+
+# con2 issues a read. Its implicit transaction must NOT disturb con1's. With the
+# single-slot manager this overwrote/freed con1's transaction.
+query I con2
+SELECT count(*) FROM t.kv WHERE key LIKE 'z_%'
+----
+0
+
+# con2's write also runs in its own transaction and auto-commits independently
+statement ok con2
+INSERT INTO t.kv VALUES ('z_other', '9')
+
+# con1 must still be alive and isolated: it sees its own uncommitted 'a' but not
+# (necessarily) con2's row, and committing must succeed without crashing.
+query I con1
+SELECT count(*) FROM t.kv WHERE key = 'a'
+----
+1
+
+statement ok con1
+INSERT INTO t.kv VALUES ('b', '2')
+
+statement ok con1
+COMMIT
+
+# After both connections settle, every committed row is present and intact.
+query II con1
+SELECT key, value FROM t.kv WHERE key IN ('a', 'b', 'z_other') ORDER BY key
+----
+a	1
+b	2
+z_other	9
+
+# ---------------------------------------------------------------------------
+# 2) Commit/Rollback must act on the passed-in transaction, not "current"
+# ---------------------------------------------------------------------------
+
+# con1 stages a row then rolls back; con2 commits its own row in between. con1's
+# ROLLBACK must not drop con2's committed row, and con2's COMMIT must not persist
+# con1's staged row.
+statement ok con1
+BEGIN
+
+statement ok con1
+INSERT INTO t.kv VALUES ('c1_doomed', 'x')
+
+statement ok con2
+INSERT INTO t.kv VALUES ('c2_keep', 'y')
+
+statement ok con1
+ROLLBACK
+
+query II
+SELECT key, value FROM t.kv WHERE key IN ('c1_doomed', 'c2_keep') ORDER BY key
+----
+c2_keep	y
+
+# ---------------------------------------------------------------------------
+# 3) Stress: many connections writing/reading the same table in parallel.
+#    `statement maybe` tolerates legitimate contention errors but a native
+#    crash (the bug) still fails the run.
+# ---------------------------------------------------------------------------
+
+concurrentloop threadid 0 16
+
+statement maybe
+INSERT INTO t.kv VALUES (concat('s_', (${threadid} % 64)::VARCHAR), (${threadid})::VARCHAR)
+----
+
+statement maybe
+SELECT count(*) FROM t.kv WHERE key LIKE 's_%'
+----
+
+statement maybe
+DELETE FROM t.kv WHERE key = concat('s_', (${threadid} % 64)::VARCHAR)
+----
+
+endloop
+
+# Survives the storm and remains queryable.
+statement ok
+SELECT count(*) FROM t.kv
