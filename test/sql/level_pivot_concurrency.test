@@ -1,6 +1,7 @@
 # name: test/sql/level_pivot_concurrency.test
 # description: Concurrent transactions across multiple connections must not corrupt or crash
 # group: [sql]
+
 #
 # LevelPivotTransactionManager used to keep a single `current_transaction` slot.
 # DuckDB starts a transaction for EVERY statement (including SELECT), so a second
