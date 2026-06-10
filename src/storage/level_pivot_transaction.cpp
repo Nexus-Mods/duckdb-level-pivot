@@ -140,9 +140,9 @@ void LevelPivotTransactionManager::Checkpoint(ClientContext &context, bool force
 void LevelPivotTransactionManager::RemoveTransaction(LevelPivotTransaction &transaction) {
 	// Caller holds transaction_lock. Erasing the unique_ptr destroys the
 	// transaction object, so the reference must not be used after this returns.
-	for (idx_t i = 0; i < active_transactions.size(); i++) {
-		if (active_transactions[i].get() == &transaction) {
-			active_transactions.erase(active_transactions.begin() + i);
+	for (auto it = active_transactions.begin(); it != active_transactions.end(); ++it) {
+		if (it->get() == &transaction) {
+			active_transactions.erase(it);
 			return;
 		}
 	}
