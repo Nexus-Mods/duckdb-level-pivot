@@ -114,6 +114,12 @@ public:
 	uint64_t total_deletes() const {
 		return total_deletes_.load(std::memory_order_relaxed);
 	}
+	// Rows examined by raw-mode scans (iterator steps + point lookups). A subtree query that seeks
+	// its prefix range examines ~subtree size; a full scan examines the whole table, so this
+	// distinguishes a pushed-down seek from a full scan.
+	uint64_t total_rows_scanned() const {
+		return total_rows_scanned_.load(std::memory_order_relaxed);
+	}
 
 	// Internal: only LevelDBWriteBatch and the put/del helpers should call these.
 	void note_write() {
@@ -125,6 +131,9 @@ public:
 	void note_deletes(uint64_t n) {
 		total_deletes_.fetch_add(n, std::memory_order_relaxed);
 	}
+	void note_rows_scanned(uint64_t n) {
+		total_rows_scanned_.fetch_add(n, std::memory_order_relaxed);
+	}
 
 private:
 	leveldb::DB *db_ = nullptr;
@@ -133,6 +142,7 @@ private:
 	std::atomic<uint64_t> total_writes_ {0};
 	std::atomic<uint64_t> total_puts_ {0};
 	std::atomic<uint64_t> total_deletes_ {0};
+	std::atomic<uint64_t> total_rows_scanned_ {0};
 
 	void check_write_allowed();
 };

@@ -14,6 +14,7 @@ struct StatsRow {
 	uint64_t total_writes;
 	uint64_t total_puts;
 	uint64_t total_deletes;
+	uint64_t total_rows_scanned;
 };
 
 struct StatsBindData : public TableFunctionData {
@@ -33,6 +34,8 @@ static unique_ptr<FunctionData> StatsBind(ClientContext &context, TableFunctionB
 	names.push_back("total_puts");
 	return_types.push_back(LogicalType::UBIGINT);
 	names.push_back("total_deletes");
+	return_types.push_back(LogicalType::UBIGINT);
+	names.push_back("total_rows_scanned");
 
 	bool has_filter = !input.inputs.empty() && !input.inputs[0].IsNull();
 	string filter_db = has_filter ? input.inputs[0].GetValue<string>() : "";
@@ -55,6 +58,7 @@ static unique_ptr<FunctionData> StatsBind(ClientContext &context, TableFunctionB
 		r.total_writes = conn->total_writes();
 		r.total_puts = conn->total_puts();
 		r.total_deletes = conn->total_deletes();
+		r.total_rows_scanned = conn->total_rows_scanned();
 		data->rows.push_back(std::move(r));
 	}
 
@@ -71,6 +75,7 @@ static void StatsFunc(ClientContext &context, TableFunctionInput &data, DataChun
 		output.SetValue(1, count, Value::UBIGINT(row.total_writes));
 		output.SetValue(2, count, Value::UBIGINT(row.total_puts));
 		output.SetValue(3, count, Value::UBIGINT(row.total_deletes));
+		output.SetValue(4, count, Value::UBIGINT(row.total_rows_scanned));
 		bind_data.offset++;
 		count++;
 	}

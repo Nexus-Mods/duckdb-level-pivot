@@ -1,0 +1,89 @@
+# name: test/sql/level_pivot_prefix_seek.test
+# description: Raw-mode starts_with(key, const) pushes down to a prefix range-seek (subtree, not full scan)
+# group: [sql]
+
+require level_pivot
+
+statement ok
+ATTACH '__TEST_DIR__/prefix_seek_db' AS p (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('p', 'kv', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['VARCHAR', 'VARCHAR']);
+
+# Structured keys using the production separator (###). The subtree under "a###b###" is what we
+# query; the surrounding keys are boundary traps the seek must NOT over-match.
+statement ok
+INSERT INTO p.kv VALUES
+  ('a###b',            'container-own-value'),  -- exact container key, NOT within 'a###b###'
+  ('a###b###leaf1',    'v1'),                   -- subtree
+  ('a###b###leaf2',    'v2'),                   -- subtree
+  ('a###b###c###deep', 'v3'),                   -- subtree (nested)
+  ('a###bextra',       'sibling'),              -- shares 'a###b' but NOT 'a###b###' (over-match trap)
+  ('a###c###leaf',     'other-branch'),         -- different branch
+  ('z###x###leaf',     'far');
+
+# Bulk filler so a full scan examines far more keys than the subtree: 10000 rows under 'fill###'.
+statement ok
+INSERT INTO p.kv SELECT 'fill###' || i, 'f' FROM range(10000) t(i);
+
+# === Correctness + over-match guard: the seek must not over-match sibling keys ===
+# A subtree query returns exactly the 'a###b###' descendants - never the sibling 'a###bextra',
+# the container's own 'a###b', the other branch, or fillers.
+query I rowsort
+SELECT key FROM p.kv WHERE starts_with(key, 'a###b###');
+----
+a###b###c###deep
+a###b###leaf1
+a###b###leaf2
+
+# === PROOF the subtree query SEEKS rather than full-scans ===
+# total_rows_scanned counts keys examined by the scan above (the first and only kv scan so far).
+# The seek examines ~the subtree (+1 boundary row), not the whole ~10007-row table, so the count
+# stays well under 100.
+query I
+SELECT count(*) FROM level_pivot_stats('p') WHERE total_rows_scanned < 100;
+----
+1
+
+# === Subtree DELETE in the production shape (key = container OR starts_with(container###)) ===
+# A fresh db so total_rows_scanned starts at 0 and reflects only the DELETE's scan.
+statement ok
+ATTACH '__TEST_DIR__/prefix_seek_del' AS d (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('d', 'kv', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['VARCHAR', 'VARCHAR']);
+
+statement ok
+INSERT INTO d.kv VALUES
+  ('a###b',         'container'),
+  ('a###b###l1',    'v1'),
+  ('a###b###l2',    'v2'),
+  ('a###bextra',    'sibling'),
+  ('a###c###leaf',  'other');
+
+statement ok
+INSERT INTO d.kv SELECT 'fill###' || i, 'f' FROM range(10000) t(i);
+
+# Delete the 'a###b' node and its subtree exactly as the Redux persistor's bulkRemoveItem does.
+statement ok
+DELETE FROM d.kv WHERE key = 'a###b' OR starts_with(key, 'a###b###');
+
+# PROOF: the DELETE's scan sought (container point-lookup + subtree range), not a full scan.
+# Asserted before any full-scan query so the cumulative counter reflects only the DELETE.
+query I
+SELECT count(*) FROM level_pivot_stats('d') WHERE total_rows_scanned < 200;
+----
+1
+
+# Correctness + over-match guard (via point/prefix seeks, which keep the counter low):
+# the subtree is gone, but the sibling 'a###bextra' and the other branch survive.
+query I
+SELECT count(*) FROM d.kv WHERE starts_with(key, 'a###b###');
+----
+0
+
+query I rowsort
+SELECT key FROM d.kv WHERE key IN ('a###b', 'a###bextra', 'a###c###leaf');
+----
+a###bextra
+a###c###leaf
