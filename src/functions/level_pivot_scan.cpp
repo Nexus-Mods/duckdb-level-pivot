@@ -300,8 +300,7 @@ static unique_ptr<GlobalTableFunctionState> LevelPivotInitGlobal(ClientContext &
 		// one. After this the prefix ranges are pairwise disjoint, so the prefix scan emits each row
 		// once. Sorted order also lets the scan seek them in a single forward pass.
 		std::sort(result->prefixes.begin(), result->prefixes.end());
-		result->prefixes.erase(std::unique(result->prefixes.begin(), result->prefixes.end()),
-		                       result->prefixes.end());
+		result->prefixes.erase(std::unique(result->prefixes.begin(), result->prefixes.end()), result->prefixes.end());
 		vector<string> kept;
 		for (auto &p : result->prefixes) {
 			// In sorted order, a nested prefix is covered iff it starts with the last kept prefix.
@@ -318,17 +317,16 @@ static unique_ptr<GlobalTableFunctionState> LevelPivotInitGlobal(ClientContext &
 		                         result->point_keys.end());
 		if (!result->prefixes.empty()) {
 			auto &prefixes = result->prefixes;
-			result->point_keys.erase(
-			    std::remove_if(result->point_keys.begin(), result->point_keys.end(),
-			                   [&](const string &k) {
-				                   for (auto &p : prefixes) {
-					                   if (IsWithinPrefix(k, p)) {
-						                   return true;
-					                   }
-				                   }
-				                   return false;
-			                   }),
-			    result->point_keys.end());
+			result->point_keys.erase(std::remove_if(result->point_keys.begin(), result->point_keys.end(),
+			                                        [&](const string &k) {
+				                                        for (auto &p : prefixes) {
+					                                        if (IsWithinPrefix(k, p)) {
+						                                        return true;
+					                                        }
+				                                        }
+				                                        return false;
+			                                        }),
+			                         result->point_keys.end());
 		}
 	}
 
