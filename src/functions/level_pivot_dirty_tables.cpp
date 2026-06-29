@@ -41,15 +41,17 @@ static unique_ptr<FunctionData> DirtyTablesBind(ClientContext &context, TableFun
 			continue;
 		}
 
-		auto &txn_manager = static_cast<LevelPivotTransactionManager &>(db.GetTransactionManager());
-		auto *txn = txn_manager.GetCurrentTransaction();
-		if (!txn || !txn->HasDirtyTables()) {
+		// This context's transaction on this database (not a global "current" - there
+		// can be several active across connections). This is the transaction that
+		// staged the writes whose dirty set we report.
+		auto &txn = Transaction::Get(context, catalog).Cast<LevelPivotTransaction>();
+		if (!txn.HasDirtyTables()) {
 			continue;
 		}
 
 		auto &lp_catalog = catalog.Cast<LevelPivotCatalog>();
 		auto &schema = lp_catalog.GetMainSchema();
-		auto &dirty = txn->GetDirtyTables();
+		auto &dirty = txn.GetDirtyTables();
 		auto db_name = db.GetName();
 
 		for (auto &table_name : dirty) {

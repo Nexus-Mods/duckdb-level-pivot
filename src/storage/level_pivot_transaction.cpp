@@ -96,13 +96,16 @@ LevelPivotTransactionManager::~LevelPivotTransactionManager() = default;
 Transaction &LevelPivotTransactionManager::StartTransaction(ClientContext &context) {
 	lock_guard<mutex> l(transaction_lock);
 	auto &lp_catalog = db.GetCatalog().Cast<LevelPivotCatalog>();
-	current_transaction = make_uniq<LevelPivotTransaction>(*this, context, lp_catalog.GetConnection());
-	return *current_transaction;
+	auto transaction = make_uniq<LevelPivotTransaction>(*this, context, lp_catalog.GetConnection());
+	auto &result = *transaction;
+	active_transactions.push_back(std::move(transaction));
+	return result;
 }
 
 ErrorData LevelPivotTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction) {
 	lock_guard<mutex> l(transaction_lock);
 	auto &lp_txn = transaction.Cast<LevelPivotTransaction>();
+	ErrorData error;
 	try {
 		lp_txn.FlushPendingBatch();
 	} catch (std::exception &e) {
@@ -112,11 +115,11 @@ ErrorData LevelPivotTransactionManager::CommitTransaction(ClientContext &context
 		} catch (...) {
 			// best-effort; original error is what matters
 		}
-		current_transaction.reset();
-		return ErrorData(e.what());
+		error = ErrorData(e.what());
 	}
-	current_transaction.reset();
-	return ErrorData();
+	// Drops lp_txn (destroys it); must be last use of the reference.
+	RemoveTransaction(lp_txn);
+	return error;
 }
 
 void LevelPivotTransactionManager::RollbackTransaction(Transaction &transaction) {
@@ -127,15 +130,22 @@ void LevelPivotTransactionManager::RollbackTransaction(Transaction &transaction)
 	} catch (...) {
 		// nothing useful to do — discard should never throw, but keep this defensive
 	}
-	current_transaction.reset();
+	// Drops lp_txn (destroys it); must be last use of the reference.
+	RemoveTransaction(lp_txn);
 }
 
 void LevelPivotTransactionManager::Checkpoint(ClientContext &context, bool force) {
 }
 
-LevelPivotTransaction *LevelPivotTransactionManager::GetCurrentTransaction() {
-	lock_guard<mutex> l(transaction_lock);
-	return current_transaction.get();
+void LevelPivotTransactionManager::RemoveTransaction(LevelPivotTransaction &transaction) {
+	// Caller holds transaction_lock. Erasing the unique_ptr destroys the
+	// transaction object, so the reference must not be used after this returns.
+	for (auto it = active_transactions.begin(); it != active_transactions.end(); ++it) {
+		if (it->get() == &transaction) {
+			active_transactions.erase(it);
+			return;
+		}
+	}
 }
 
 } // namespace duckdb

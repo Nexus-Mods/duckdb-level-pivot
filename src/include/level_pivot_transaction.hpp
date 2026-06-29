@@ -71,12 +71,19 @@ public:
 	void RollbackTransaction(Transaction &transaction) override;
 	void Checkpoint(ClientContext &context, bool force = false) override;
 
-	//! Get the current transaction, or nullptr if none active
-	LevelPivotTransaction *GetCurrentTransaction();
-
 private:
+	//! Drop a finished transaction from the active set. Caller must hold transaction_lock.
+	void RemoveTransaction(LevelPivotTransaction &transaction);
+
 	mutex transaction_lock;
-	unique_ptr<LevelPivotTransaction> current_transaction;
+	//! One live transaction per active DuckDB transaction (one per connection),
+	//! mirroring DuckTransactionManager. A single shared slot is unsafe: DuckDB opens
+	//! a transaction for every statement (including SELECT), so a second connection's
+	//! transaction would replace and destroy the first connection's transaction while
+	//! it is still in use. Each connection must keep resolving to its own transaction
+	//! until it commits or rolls back.
+	//! Regression: test/sql/level_pivot_concurrency.test.
+	vector<unique_ptr<LevelPivotTransaction>> active_transactions;
 };
 
 } // namespace duckdb
