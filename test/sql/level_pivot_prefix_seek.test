@@ -87,3 +87,27 @@ SELECT key FROM d.kv WHERE key IN ('a###b', 'a###bextra', 'a###c###leaf');
 ----
 a###bextra
 a###c###leaf
+
+# === total_rows_scanned counts only point-lookup hits, not misses ===
+# A fresh db so the counter reflects only the query below.
+statement ok
+ATTACH '__TEST_DIR__/point_miss_db' AS m (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('m', 'kv', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['VARCHAR', 'VARCHAR']);
+
+statement ok
+INSERT INTO m.kv VALUES ('k1', 'v1'), ('k2', 'v2');
+
+# Two of these keys exist, three are absent.
+query I rowsort
+SELECT key FROM m.kv WHERE key IN ('k1', 'k2', 'nope1', 'nope2', 'nope3');
+----
+k1
+k2
+
+# The three missing keys must not inflate the counter: exactly two rows were examined.
+query I
+SELECT total_rows_scanned FROM level_pivot_stats('m');
+----
+2
