@@ -1,9 +1,10 @@
 # name: test/sql/level_pivot_overlay_tombstone.test
-# description: Repro for MergedIterator tombstone bug — an in-transaction iterator scan re-emits a
-#              row deleted in the same transaction when the deleted key sorts after an earlier key.
-#              (advance_to_next_visible consumes the overlay tombstone before the base cursor reaches
-#              it, so the base copy of the key is never suppressed.) See src/storage/level_pivot_overlay.cpp.
+# description: MergedIterator must hide an in-transaction tombstone for a key that sorts after an earlier key during an iterator scan
 # group: [sql]
+
+# Regression for the MergedIterator tombstone bug: advance_to_next_visible consumed the overlay
+# tombstone before the base cursor reached it, so the base copy of the deleted key was re-emitted.
+# See src/storage/level_pivot_overlay.cpp.
 
 require level_pivot
 
