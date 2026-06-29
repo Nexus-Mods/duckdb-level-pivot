@@ -58,6 +58,12 @@ void MergedIterator::seek_to_first() {
 void MergedIterator::advance_to_next_visible() {
 	while (true) {
 		if (overlay_ && ov_it_ != overlay_->end() && !ov_it_->second.has_value()) {
+			// Resolve a tombstone only once the base cursor has reached (or passed) its key. If the
+			// tombstone sorts after the current base key, the base key is emitted first; consuming the
+			// tombstone now would drop it before it can suppress the matching base row later.
+			if (base_.valid() && std::string_view(ov_it_->first) > base_.key_view()) {
+				break;
+			}
 			if (base_.valid() && base_.key_view() == std::string_view(ov_it_->first)) {
 				base_.next();
 			}

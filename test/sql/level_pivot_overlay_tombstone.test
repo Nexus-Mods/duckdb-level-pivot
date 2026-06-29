@@ -1,0 +1,77 @@
+# name: test/sql/level_pivot_overlay_tombstone.test
+# description: Repro for MergedIterator tombstone bug — an in-transaction iterator scan re-emits a
+#              row deleted in the same transaction when the deleted key sorts after an earlier key.
+#              (advance_to_next_visible consumes the overlay tombstone before the base cursor reaches
+#              it, so the base copy of the key is never suppressed.) See src/storage/level_pivot_overlay.cpp.
+# group: [sql]
+
+require level_pivot
+
+statement ok
+ATTACH '__TEST_DIR__/overlay_tomb_db' AS t (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('t', 'kv', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['VARCHAR', 'VARCHAR']);
+
+# Commit two rows to LevelDB via autocommit. 'm' sorts AFTER 'a'.
+statement ok
+INSERT INTO t.kv VALUES ('a', 'keep'), ('m', 'del');
+
+statement ok
+BEGIN;
+
+# Delete the later-sorting row. This stages an overlay tombstone for 'm'; the committed copy is
+# still in LevelDB (flushed only on COMMIT), so the in-transaction scan merges base + overlay.
+statement ok
+DELETE FROM t.kv WHERE key = 'm';
+
+# A full (iterator) scan in the SAME transaction must not see the deleted row.
+# BUG: returns 'a' and 'm' — the tombstone for 'm' fails to hide the base row.
+query I rowsort
+SELECT key FROM t.kv;
+----
+a
+
+# A point lookup takes a different path (direct overlay lookup) and correctly hides 'm'.
+query I
+SELECT count(*) FROM t.kv WHERE key = 'm';
+----
+0
+
+statement ok
+COMMIT;
+
+# Committed state after the transaction: only 'a' remains.
+query I rowsort
+SELECT key FROM t.kv;
+----
+a
+
+# Interleaved tombstones: delete several non-adjacent committed keys, then full-scan in the same txn.
+statement ok
+INSERT INTO t.kv VALUES ('b', '1'), ('c', '2'), ('d', '3'), ('e', '4');
+
+statement ok
+BEGIN;
+
+statement ok
+DELETE FROM t.kv WHERE key IN ('b', 'd');
+
+# The surviving keys (and only those) must be visible to the in-transaction iterator scan.
+query I rowsort
+SELECT key FROM t.kv;
+----
+a
+c
+e
+
+statement ok
+COMMIT;
+
+# And the same after commit, once the tombstones are flushed.
+query I rowsort
+SELECT key FROM t.kv;
+----
+a
+c
+e
