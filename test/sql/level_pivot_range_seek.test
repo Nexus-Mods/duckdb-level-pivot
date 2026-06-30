@@ -1,0 +1,183 @@
+# name: test/sql/level_pivot_range_seek.test
+# description: Raw-mode range predicates (>=,>,<,<=,BETWEEN) push down to a bounded range-seek
+# group: [sql]
+
+require level_pivot
+
+statement ok
+ATTACH '__TEST_DIR__/range_seek_db' AS p (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('p', 'kv', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['VARCHAR', 'VARCHAR']);
+
+statement ok
+INSERT INTO p.kv VALUES
+  ('a###b###leaf1', 'v1'),
+  ('a###b###leaf2', 'v2'),
+  ('a###b###leaf3', 'v3'),
+  ('a###c###x',     'other');
+
+# Bulk filler so a full scan examines far more keys than the matched range.
+statement ok
+INSERT INTO p.kv SELECT 'fill###' || i, 'f' FROM range(10000) t(i);
+
+# === Correctness: two-sided range returns exactly the in-range rows ===
+query I rowsort
+SELECT key FROM p.kv WHERE key >= 'a###b###' AND key < 'a###b###~';
+----
+a###b###leaf1
+a###b###leaf2
+a###b###leaf3
+
+# === PROOF the two-sided range SEEKS rather than full-scans ===
+# The seek examines ~the matched range (+1 boundary), not the whole ~10004-row table.
+query I
+SELECT count(*) FROM level_pivot_stats('p') WHERE total_rows_scanned < 100;
+----
+1
+
+# === No duplicate rows when a range overlaps a prefix at top-level AND ===
+# starts_with pushes a prefix; `key < ...` pushes a range. They overlap on leaf1/leaf2, so a naive
+# two-phase scan would emit each twice (the post-filter does not de-duplicate).
+query I rowsort
+SELECT key FROM p.kv WHERE starts_with(key, 'a###b###') AND key < 'a###b###leaf3';
+----
+a###b###leaf1
+a###b###leaf2
+
+# === Boundary inclusivity: a seek must not under-include a boundary row (post-filter can't add it) ===
+statement ok
+ATTACH '__TEST_DIR__/range_bounds_db' AS q (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('q', 'kv', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['VARCHAR', 'VARCHAR']);
+
+statement ok
+INSERT INTO q.kv VALUES ('m10','a'), ('m20','b'), ('m30','c'), ('m40','d');
+
+# inclusive both ends (literal BETWEEN)
+query I rowsort
+SELECT key FROM q.kv WHERE key BETWEEN 'm20' AND 'm30';
+----
+m20
+m30
+
+# inclusive lower, exclusive upper (folded >= AND <)
+query I rowsort
+SELECT key FROM q.kv WHERE key >= 'm20' AND key < 'm30';
+----
+m20
+
+# exclusive lower, inclusive upper (folded > AND <=)
+query I rowsort
+SELECT key FROM q.kv WHERE key > 'm20' AND key <= 'm30';
+----
+m30
+
+# one-sided exclusive lower
+query I rowsort
+SELECT key FROM q.kv WHERE key > 'm20';
+----
+m30
+m40
+
+# one-sided inclusive upper
+query I rowsort
+SELECT key FROM q.kv WHERE key <= 'm20';
+----
+m10
+m20
+
+# === A range spanning many output chunks returns every row exactly once (resume correctness) ===
+statement ok
+ATTACH '__TEST_DIR__/range_big_db' AS r (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('r', 'kv', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['VARCHAR', 'VARCHAR']);
+
+# 5000 contiguous 'r####' keys, plus 5000 'fill###' keys that sort before them (boundary noise).
+statement ok
+INSERT INTO r.kv SELECT 'r' || lpad(i::VARCHAR, 4, '0'), 'v' FROM range(5000) t(i);
+
+statement ok
+INSERT INTO r.kv SELECT 'fill###' || i, 'f' FROM range(5000) t(i);
+
+# Range r1000..r3999 = 3000 rows, spanning ~2 output chunks (STANDARD_VECTOR_SIZE = 2048).
+query I
+SELECT count(*) FROM r.kv WHERE key >= 'r1000' AND key < 'r4000';
+----
+3000
+
+# Seek proof (checked right after the single scan above; total_rows_scanned is cumulative):
+# examines ~the 3000-row range (+1 boundary), not the ~10000-row table.
+query I
+SELECT count(*) FROM level_pivot_stats('r') WHERE total_rows_scanned < 3100;
+----
+1
+
+# Every matched key is distinct: no row emitted twice across a chunk boundary, none missed.
+query I
+SELECT count(*) = count(DISTINCT key) FROM r.kv WHERE key >= 'r1000' AND key < 'r4000';
+----
+true
+
+# === Inverted/empty range (lo > hi) returns nothing ===
+query I
+SELECT count(*) FROM q.kv WHERE key > 'm30' AND key < 'm20';
+----
+0
+
+# === A range-seek sees uncommitted overlay writes (it scans via the merged iterator) ===
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO q.kv VALUES ('m25', 'pending');
+
+# m25 falls in the open range and must be visible inside the transaction
+query I rowsort
+SELECT key FROM q.kv WHERE key > 'm20' AND key < 'm30';
+----
+m25
+
+statement ok
+DELETE FROM q.kv WHERE key = 'm30';
+
+# overlay tombstone inside the range must be hidden from the seek
+query I rowsort
+SELECT key FROM q.kv WHERE key >= 'm25' AND key <= 'm40';
+----
+m25
+m40
+
+statement ok
+ROLLBACK;
+
+# === Non-VARCHAR key columns: range pushdown must NOT use lexicographic byte order ===
+# Integer keys are stored as decimal strings ('2','10','100'), whose byte order ('10' < '100' < '2')
+# differs from value order. A lexicographic range-seek would skip rows the post-filter can't recover,
+# so range pushdown must be suppressed for non-VARCHAR keys (falling back to a correct full scan).
+statement ok
+ATTACH '__TEST_DIR__/range_intkey_db' AS n (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('n', 'kv', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['INTEGER', 'VARCHAR']);
+
+statement ok
+INSERT INTO n.kv VALUES (2,'a'), (3,'b'), (10,'c'), (20,'d'), (100,'e'), (250,'f');
+
+query I
+SELECT key FROM n.kv WHERE key BETWEEN 2 AND 100 ORDER BY key;
+----
+2
+3
+10
+20
+100
+
+query I
+SELECT key FROM n.kv WHERE key >= 20 ORDER BY key;
+----
+20
+100
+250
