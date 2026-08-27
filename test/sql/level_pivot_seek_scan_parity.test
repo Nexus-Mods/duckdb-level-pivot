@@ -1,0 +1,121 @@
+# name: test/sql/level_pivot_seek_scan_parity.test
+# description: A pushed-down prefix seek returns exactly what a full scan returns for the same prefix
+# group: [sql]
+
+require level_pivot
+
+statement ok
+ATTACH '__TEST_DIR__/seek_scan_parity_db' AS p (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('p', 'kv', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['VARCHAR', 'VARCHAR']);
+
+# A seek resolves through the store's per-level key-range index; a scan reads every file through
+# the merging iterator. The two must agree. When they disagree the seek reports a subtree as empty
+# or partial while its keys are still live, which is silent data loss for any caller that reads by
+# prefix. strpos(key, ...) = 1 is the scan oracle: it is a prefix test the planner cannot push down,
+# so it is answered by a full scan.
+
+# Several branches with enough rows each to span multiple blocks, plus non-ascii branch names -
+# the store compares keys bytewise, and every non-ascii lead byte sorts above 'z'.
+statement ok
+INSERT INTO p.kv SELECT 'persistent###mods###alpha###mod' || i || '###id',   'v' FROM range(4000) t(i);
+
+statement ok
+INSERT INTO p.kv SELECT 'persistent###mods###beta###mod' || i || '###id',    'v' FROM range(4000) t(i);
+
+statement ok
+INSERT INTO p.kv SELECT 'persistent###mods###Ätherisch###mod' || i || '###id', 'v' FROM range(2000) t(i);
+
+statement ok
+INSERT INTO p.kv SELECT 'persistent###mods###日本語###mod' || i || '###id',   'v' FROM range(2000) t(i);
+
+statement ok
+INSERT INTO p.kv SELECT 'persistent###downloads###files###dl' || i || '###size', 's' FROM range(6000) t(i);
+
+# Rewrites and deletes leave superseded versions and tombstones behind, so the levels hold several
+# entries per live key and have to be merged correctly.
+statement ok
+UPDATE p.kv SET value = 'v2' WHERE strpos(key, 'persistent###mods###alpha###') = 1;
+
+statement ok
+DELETE FROM p.kv WHERE strpos(key, 'persistent###downloads###files###dl1') = 1;
+
+statement ok
+INSERT INTO p.kv SELECT 'persistent###mods###alpha###late' || i || '###id', 'v' FROM range(500) t(i);
+
+# === Parity: seek and scan must return the same number of rows for every prefix ===
+
+query I
+SELECT (SELECT count(*) FROM p.kv WHERE starts_with(key, 'persistent###mods###alpha###'))
+     - (SELECT count(*) FROM p.kv WHERE strpos(key, 'persistent###mods###alpha###') = 1);
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM p.kv WHERE starts_with(key, 'persistent###mods###beta###'))
+     - (SELECT count(*) FROM p.kv WHERE strpos(key, 'persistent###mods###beta###') = 1);
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM p.kv WHERE starts_with(key, 'persistent###mods###Ätherisch###'))
+     - (SELECT count(*) FROM p.kv WHERE strpos(key, 'persistent###mods###Ätherisch###') = 1);
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM p.kv WHERE starts_with(key, 'persistent###mods###日本語###'))
+     - (SELECT count(*) FROM p.kv WHERE strpos(key, 'persistent###mods###日本語###') = 1);
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM p.kv WHERE starts_with(key, 'persistent###downloads###files###'))
+     - (SELECT count(*) FROM p.kv WHERE strpos(key, 'persistent###downloads###files###') = 1);
+----
+0
+
+# A whole branch must never come back empty while the scan can still see it.
+query I
+SELECT count(*) > 0 FROM p.kv WHERE starts_with(key, 'persistent###mods###日本語###');
+----
+true
+
+# === Parity for the range form, which is the other shape that pushes down ===
+# The exclusive upper bound is the prefix with its final byte incremented ('#' -> '$'), which is
+# the only bound that covers every key under the prefix. Appending a sentinel character instead
+# silently truncates the range at whatever that character sorts below.
+
+query I
+SELECT (SELECT count(*) FROM p.kv WHERE key >= 'persistent###mods###beta###' AND key < 'persistent###mods###beta##$')
+     - (SELECT count(*) FROM p.kv WHERE strpos(key, 'persistent###mods###beta###') = 1);
+----
+0
+
+# === The parity checks above are only meaningful if the seek really seeks ===
+# total_rows_scanned is cumulative per connection and the parity checks above deliberately run full
+# scans, so the proof needs a database whose only query is the seek.
+
+statement ok
+ATTACH '__TEST_DIR__/seek_scan_parity_proof' AS q (TYPE level_pivot, READ_ONLY false, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('q', 'kv', NULL, ['key', 'value'], table_mode := 'raw', column_types := ['VARCHAR', 'VARCHAR']);
+
+statement ok
+INSERT INTO q.kv SELECT 'persistent###mods###alpha###mod' || i || '###id', 'v' FROM range(8000) t(i);
+
+statement ok
+INSERT INTO q.kv SELECT 'persistent###mods###日本語###mod' || i || '###id', 'v' FROM range(200) t(i);
+
+query I
+SELECT count(*) FROM q.kv WHERE starts_with(key, 'persistent###mods###日本語###');
+----
+200
+
+# The seek examined the 200-row subtree, not the whole 8200-row table.
+query I
+SELECT count(*) FROM level_pivot_stats('q') WHERE total_rows_scanned < 1000;
+----
+1
