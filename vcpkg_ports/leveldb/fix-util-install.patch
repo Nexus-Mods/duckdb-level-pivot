@@ -2,14 +2,28 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 39536fc..648de6d 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -477,6 +477,11 @@ if(LEVELDB_INSTALL)
+@@ -477,6 +477,25 @@ if(LEVELDB_INSTALL)
      DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/leveldb"
    )
  
++  # Internal headers, so a consumer can read a store's own files the way
++  # leveldb does rather than reimplementing its formats: db/ carries the
++  # descriptor and log record readers, port/ is what util/coding.h needs.
 +  file(GLOB HEADER_UTIL "${PROJECT_SOURCE_DIR}/util/*.h" )
 +  file(GLOB HEADER_TABLE "${PROJECT_SOURCE_DIR}/table/*.h" )
++  file(GLOB HEADER_DB "${PROJECT_SOURCE_DIR}/db/*.h" )
++  file(GLOB HEADER_PORT "${PROJECT_SOURCE_DIR}/port/*.h" )
 +  install(FILES ${HEADER_UTIL} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/leveldb/util)
 +  install(FILES ${HEADER_TABLE} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/leveldb/table)
++  install(FILES ${HEADER_DB} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/leveldb/db)
++  install(FILES ${HEADER_PORT} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/leveldb/port)
++  # Generated, so it is not in the source tree with the rest of port/. Without
++  # it a consumer compiles port_stdcxx.h with HAVE_SNAPPY and HAVE_CRC32C
++  # undefined while the library was built with them on, which makes the inline
++  # port:: functions different in the two translation units - an ODR violation
++  # the linker is free to resolve the wrong way.
++  install(FILES "${PROJECT_BINARY_DIR}/include/port/port_config.h"
++          DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/leveldb/port)
 +
    include(CMakePackageConfigHelpers)
    configure_package_config_file(

@@ -12,6 +12,7 @@ vcpkg_from_github(
         fix-dependencies.patch
         fix-util-install.patch
         fix-unicode-paths.patch
+        enforce-table-key-order.patch
 )
 
 file(COPY "${CURRENT_PORT_DIR}/leveldbConfig.cmake.in" DESTINATION "${SOURCE_PATH}/cmake")

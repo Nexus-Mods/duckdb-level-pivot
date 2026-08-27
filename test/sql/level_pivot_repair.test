@@ -1,0 +1,271 @@
+# name: test/sql/level_pivot_repair.test
+# description: Rebuild a store whose tables hold keys out of order
+# group: [sql]
+
+#
+# A table written out of order hides live keys from every read that goes
+# through leveldb's iterators, because they skip anything sorting below what
+# they already emitted. The data is still on disk, so it can be recovered by
+# reading each table file directly, in file order, and writing the result into
+# a fresh store - which sorts it.
+#
+# The rebuild never touches the source: it stages a copy, lets leveldb's own
+# RepairDB fold any write-ahead log into tables there, and writes the merged
+# result to the target. The caller decides whether to swap the two.
+#
+# The fixture holds 24 keys across two tables and leveldb returns only 16 of
+# them; see scripts/make_unsorted_fixture.py.
+
+require level_pivot
+
+# ---------------------------------------------------------------------------
+# every key comes back
+# ---------------------------------------------------------------------------
+
+query I
+SELECT live_keys FROM level_pivot_repair_store(
+    '__WORKING_DIRECTORY__/test/fixtures/unsorted_table',
+    '__TEST_DIR__/repaired_store');
+----
+24
+
+# ---------------------------------------------------------------------------
+# an obsolete table is left where it lies
+#
+# The fixture holds a table the descriptor does not reference, carrying four
+# keys that were deleted. leveldb drops a tombstone once its key reaches the
+# base level, so a deletion leaves no trace beyond the key's absence from the
+# live tables - and a rebuild that read every .ldb file it found would hand
+# those keys back to the user as if they had never been deleted.
+# ---------------------------------------------------------------------------
+
+query I
+SELECT unreferenced_files FROM level_pivot_repair_store(
+    '__WORKING_DIRECTORY__/test/fixtures/unsorted_table',
+    '__TEST_DIR__/repaired_no_resurrection');
+----
+1
+
+statement ok
+ATTACH '__TEST_DIR__/repaired_no_resurrection' AS nr (TYPE level_pivot);
+
+statement ok
+CALL level_pivot_create_table('nr', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+query I
+SELECT count(*) FROM nr.kv WHERE starts_with(key, 'key_deleted');
+----
+0
+
+statement ok
+DETACH nr;
+
+query I
+SELECT count(*) FROM level_pivot_check_integrity('__TEST_DIR__/repaired_store');
+----
+0
+
+# the rebuilt store reads back in full, where the original yielded 16
+statement ok
+ATTACH '__TEST_DIR__/repaired_store' AS r (TYPE level_pivot);
+
+statement ok
+CALL level_pivot_create_table('r', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+query I
+SELECT count(*) FROM r.kv;
+----
+24
+
+# and the keys the broken order hid are reachable by seek, not just by scan
+query I
+SELECT count(*) FROM r.kv WHERE starts_with(key, 'key_a');
+----
+8
+
+statement ok
+DETACH r;
+
+# ---------------------------------------------------------------------------
+# the source is left exactly as it was
+# ---------------------------------------------------------------------------
+
+query II
+SELECT file, problem
+FROM level_pivot_check_integrity('__WORKING_DIRECTORY__/test/fixtures/unsorted_table');
+----
+000005.ldb	unsorted_keys
+
+# ---------------------------------------------------------------------------
+# an existing target is never overwritten - the caller keeps both copies until
+# it chooses to swap them
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT * FROM level_pivot_repair_store(
+    '__WORKING_DIRECTORY__/test/fixtures/unsorted_table',
+    '__TEST_DIR__/repaired_store');
+----
+already exists
+
+# a target whose parent is missing is a mistyped path, not an invitation to
+# create the tree
+statement error
+SELECT * FROM level_pivot_repair_store(
+    '__WORKING_DIRECTORY__/test/fixtures/unsorted_table',
+    '__TEST_DIR__/no_such_parent/repaired');
+----
+does not exist
+
+# ---------------------------------------------------------------------------
+# a healthy store survives the round trip unchanged
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '__TEST_DIR__/repair_healthy' AS h (TYPE level_pivot, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('h', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+statement ok
+INSERT INTO h.kv SELECT 'key_' || printf('%06d', i), 'value_' || i FROM range(5000) t(i);
+
+statement ok
+DETACH h;
+
+query I
+SELECT live_keys FROM level_pivot_repair_store(
+    '__TEST_DIR__/repair_healthy', '__TEST_DIR__/repair_healthy_out');
+----
+5000
+
+statement ok
+ATTACH '__TEST_DIR__/repair_healthy_out' AS ho (TYPE level_pivot);
+
+statement ok
+CALL level_pivot_create_table('ho', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+query I
+SELECT count(*) FROM ho.kv WHERE value = 'value_4999';
+----
+1
+
+statement ok
+DETACH ho;
+
+# ---------------------------------------------------------------------------
+# deletions stay deleted: a tombstone must not be undone by the rebuild
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '__TEST_DIR__/repair_deletes' AS d (TYPE level_pivot, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('d', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+statement ok
+INSERT INTO d.kv SELECT 'key_' || printf('%06d', i), 'value_' || i FROM range(4000) t(i);
+
+statement ok
+DETACH d;
+
+# reopening flushes those writes into a table, so the deletions below land in
+# a different table from the values they cover - the merge has to resolve them
+# across files, which is where a rebuild can silently resurrect deleted rows
+statement ok
+ATTACH '__TEST_DIR__/repair_deletes' AS d (TYPE level_pivot);
+
+statement ok
+CALL level_pivot_create_table('d', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+statement ok
+DELETE FROM d.kv WHERE key < 'key_001000';
+
+statement ok
+DETACH d;
+
+query III
+SELECT live_keys, suppressed_by_deletion, unparsable_entries
+FROM level_pivot_repair_store(
+    '__TEST_DIR__/repair_deletes', '__TEST_DIR__/repair_deletes_out');
+----
+3000	1000	0
+
+# and the deleted keys are really gone from the rebuilt store, not merely
+# absent from the count
+statement ok
+ATTACH '__TEST_DIR__/repair_deletes_out' AS dout (TYPE level_pivot);
+
+statement ok
+CALL level_pivot_create_table('dout', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+query I
+SELECT count(*) FROM dout.kv WHERE key < 'key_001000';
+----
+0
+
+query I
+SELECT count(*) FROM dout.kv WHERE key = 'key_003999';
+----
+1
+
+statement ok
+DETACH dout;
+
+# ---------------------------------------------------------------------------
+# a value written after a deletion survives, in the other direction: the
+# newest sequence has to win regardless of which file it sits in
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '__TEST_DIR__/repair_rewrite' AS w (TYPE level_pivot, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('w', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+statement ok
+INSERT INTO w.kv SELECT 'key_' || printf('%06d', i), 'first_' || i FROM range(2000) t(i);
+
+statement ok
+DELETE FROM w.kv WHERE key < 'key_000500';
+
+statement ok
+DETACH w;
+
+statement ok
+ATTACH '__TEST_DIR__/repair_rewrite' AS w (TYPE level_pivot);
+
+statement ok
+CALL level_pivot_create_table('w', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+# re-insert some of what was deleted, into a later table than the tombstones
+statement ok
+INSERT INTO w.kv SELECT 'key_' || printf('%06d', i), 'second_' || i FROM range(200) t(i);
+
+statement ok
+DETACH w;
+
+query I
+SELECT live_keys FROM level_pivot_repair_store(
+    '__TEST_DIR__/repair_rewrite', '__TEST_DIR__/repair_rewrite_out');
+----
+1700
+
+statement ok
+ATTACH '__TEST_DIR__/repair_rewrite_out' AS wout (TYPE level_pivot);
+
+statement ok
+CALL level_pivot_create_table('wout', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+query I
+SELECT value FROM wout.kv WHERE key = 'key_000000';
+----
+second_0
+
+query I
+SELECT count(*) FROM wout.kv WHERE key >= 'key_000200' AND key < 'key_000500';
+----
+0
+
+statement ok
+DETACH wout;

@@ -1,0 +1,4 @@
+# leveldb store files are binary, and CURRENT in particular must end with a
+# single LF - leveldb strips exactly one byte and would otherwise look for a
+# descriptor whose name ends in CR.
+* -text

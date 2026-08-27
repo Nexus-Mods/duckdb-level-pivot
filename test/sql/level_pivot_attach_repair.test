@@ -1,0 +1,66 @@
+# name: test/sql/level_pivot_attach_repair.test
+# description: Verify tables on attach, and rebuild the store when asked
+# group: [sql]
+
+#
+# A store whose tables hold keys out of order is only partly readable and
+# leveldb reports no error for it, so reads silently return less than is
+# stored. Attach is the last point at which that can be caught and the store
+# still rebuilt, so the check runs there by default.
+#
+# Rebuilding is not automatic: it rewrites the store, so the caller opts in
+# with repair_if_corrupt. The fixture holds 24 keys and leveldb reads 16; see
+# scripts/make_unsorted_fixture.py.
+#
+# The fixture is copied by attaching a rebuild of it, because these tests must
+# not modify the copy in the source tree.
+
+require level_pivot
+
+# ---------------------------------------------------------------------------
+# by default a damaged store refuses to attach, naming what is wrong rather
+# than opening and quietly losing rows
+# ---------------------------------------------------------------------------
+
+statement ok
+SELECT * FROM level_pivot_repair_store(
+    '__WORKING_DIRECTORY__/test/fixtures/unsorted_table', '__TEST_DIR__/attach_healthy');
+
+# a rebuilt store attaches with the check enabled, so the check is not simply
+# rejecting everything
+statement ok
+ATTACH '__TEST_DIR__/attach_healthy' AS good (TYPE level_pivot);
+
+statement ok
+CALL level_pivot_create_table('good', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+query I
+SELECT count(*) FROM good.kv;
+----
+24
+
+statement ok
+DETACH good;
+
+# ---------------------------------------------------------------------------
+# the damaged fixture is refused, and named. The check runs before the store
+# is opened, so a refused attach leaves it untouched - which is what lets this
+# test point at the copy in the source tree.
+# ---------------------------------------------------------------------------
+
+statement error
+ATTACH '__WORKING_DIRECTORY__/test/fixtures/unsorted_table' AS damaged (TYPE level_pivot);
+----
+reads return less than is stored
+
+# the message says which file and how bad, so a support log is actionable
+statement error
+ATTACH '__WORKING_DIRECTORY__/test/fixtures/unsorted_table' AS damaged (TYPE level_pivot);
+----
+000005.ldb: unsorted_keys
+
+# Note: nothing here may ATTACH the fixture itself. Opening a store runs
+# leveldb's recovery over it, which writes a lock, a log and a fresh
+# descriptor - so an attach test pointed at the source tree would rewrite the
+# fixture it is testing. The refusal above is safe precisely because it
+# happens before the store is opened.

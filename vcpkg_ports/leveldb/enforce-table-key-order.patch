@@ -1,0 +1,82 @@
+Reject unsorted keys when building a table, in release builds too.
+
+TableBuilder::Add only checks that keys arrive in order under an assert, so a
+release build (NDEBUG) writes an unsorted table silently. Nothing downstream
+tolerates that: the merging iterator and the DB iterator both skip anything
+sorting below what they already emitted, so whole runs of live keys become
+invisible to reads while the data sits intact on disk, and every compaction
+that reads such a table passes the disorder into its output. See
+Nexus-Mods/Vortex#23981, where a full scan returned 167k of 309k live keys.
+
+Failing the build leaves the corrupt table unwritten and surfaces the error on
+the flush or compaction that produced it.
+
+RocksDB, leveldb's fork, reached the same design: check_flush_compaction_key_order
+shipped in 6.14 defaulting to on, and was removed outright in 9.0.0 with the
+check made unconditional, because "over time this validation has shown to be
+cheap and correct, so the option to disable it can now be removed". The option
+added here follows their first step: on by default, present only so an affected
+user can get a writable store back without downgrading, and expected to go once
+we have the same confidence.
+
+Note what this means for a store that is ALREADY damaged: the first compaction
+that reads an unsorted table fails, DBImpl::RecordBackgroundError latches
+bg_error_ for the lifetime of the open DB, and MakeRoomForWrite then yields that
+error for every write. Recovery flushes the write-ahead log through the same
+path, so this can also fail DB::Open. The store becomes readable but not
+writable until it is rebuilt. That is deliberate - a store that silently drops
+keys from reads must not keep accepting writes - but it means detection and
+repair have to reach such a user, or the option above is their only way out.
+
+The message names both offending keys. RocksDB's equivalent does not, and every
+downstream report of it turns into a hunt for which file and which key.
+
+--- a/include/leveldb/options.h
++++ b/include/leveldb/options.h
+@@ -57,6 +57,18 @@ struct LEVELDB_EXPORT Options {
+   // corruption of one DB entry may cause a large number of entries to
+   // become unreadable or for the entire DB to become unopenable.
+   bool paranoid_checks = false;
+
++  // If true, building a table rejects a key that does not sort after the
++  // previous one, failing the flush or compaction that produced it.
++  //
++  // An unsorted table is only partly readable and leveldb reports no error
++  // for it: iterators skip anything sorting below what they already emitted,
++  // so reads silently return less than is stored, and compactions spread the
++  // disorder. Refusing to write one keeps the damage to the operation that
++  // caused it.
++  //
++  // Default: true
++  bool check_key_order = true;
++
+   // Use the specified object to interact with the environment,
+   // e.g. to read/write files, schedule background work, etc.
+   // Default: Env::Default()
+--- a/table/table_builder.cc
++++ b/table/table_builder.cc
+@@ -15,6 +15,7 @@
+ #include "table/format.h"
+ #include "util/coding.h"
+ #include "util/crc32c.h"
++#include "util/logging.h"
+
+ namespace leveldb {
+
+@@ -96,6 +97,16 @@ void TableBuilder::Add(const Slice& key, const Slice& value) {
+   assert(!r->closed);
+   if (!ok()) return;
+   if (r->num_entries > 0) {
++    // Checked in every build, not just under an assert: an unsorted table is
++    // silently unreadable in part, so refusing to write one is always better
++    // than emitting it.
++    if (r->options.check_key_order &&
++        r->options.comparator->Compare(key, Slice(r->last_key)) <= 0) {
++      r->status = Status::Corruption(
++          "keys added to table out of order",
++          EscapeString(r->last_key) + " then " + EscapeString(key));
++      return;
++    }
+     assert(r->options.comparator->Compare(key, Slice(r->last_key)) > 0);
+   }
+
