@@ -269,3 +269,37 @@ SELECT count(*) FROM wout.kv WHERE key >= 'key_000200' AND key < 'key_000500';
 
 statement ok
 DETACH wout;
+
+# ---------------------------------------------------------------------------
+# a store that is open elsewhere is not repaired
+#
+# A caller repairs a store in order to put the result in its place, and
+# renaming a directory out from under whoever holds it succeeds on POSIX -
+# leaving that process writing into a directory nobody can reach. Holding
+# leveldb's own lock for the read is what says no one else has it.
+# ---------------------------------------------------------------------------
+
+statement ok
+ATTACH '__TEST_DIR__/repair_locked' AS locked (TYPE level_pivot, CREATE_IF_MISSING true);
+
+statement ok
+CALL level_pivot_create_table('locked', 'kv', NULL, ['key', 'value'], table_mode := 'raw');
+
+statement ok
+INSERT INTO locked.kv VALUES ('key_a', 'value_a'), ('key_b', 'value_b');
+
+statement error
+SELECT * FROM level_pivot_repair_store(
+    '__TEST_DIR__/repair_locked', '__TEST_DIR__/repair_locked_out');
+----
+while it is open elsewhere
+
+statement ok
+DETACH locked;
+
+# and it goes through once the holder has let go
+query I
+SELECT live_keys FROM level_pivot_repair_store(
+    '__TEST_DIR__/repair_locked', '__TEST_DIR__/repair_locked_out');
+----
+2

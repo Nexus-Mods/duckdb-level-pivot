@@ -34,6 +34,26 @@ vcpkg_cmake_configure(
 vcpkg_cmake_install()
 vcpkg_cmake_config_fixup(CONFIG_PATH "lib/cmake/leveldb")
 
+# Internal headers, so we can read a store's own files the way leveldb does
+# rather than reimplementing its formats: db/ carries the descriptor and log
+# record readers, port/ is what util/coding.h needs. util/ and table/ arrive
+# through fix-util-install.patch, which is vcpkg's own; keeping our additions
+# here is what lets that patch stay byte-identical to theirs.
+foreach(subdir db port)
+    file(GLOB internal_headers "${SOURCE_PATH}/${subdir}/*.h")
+    file(COPY ${internal_headers} DESTINATION "${CURRENT_PACKAGES_DIR}/include/leveldb/${subdir}")
+endforeach()
+
+# port_config.h is generated, so it is not in the source tree with the rest of
+# port/. Without it we compile port_stdcxx.h with HAVE_SNAPPY and HAVE_CRC32C
+# undefined while the library was built with them on, which makes the inline
+# port:: functions differ between translation units - an ODR violation the
+# linker is free to resolve the wrong way.
+set(port_config "${CURRENT_BUILDTREES_DIR}/${TARGET_TRIPLET}-rel/include/port/port_config.h")
+if(NOT EXISTS "${port_config}")
+    set(port_config "${CURRENT_BUILDTREES_DIR}/${TARGET_TRIPLET}-dbg/include/port/port_config.h")
+endif()
+file(COPY "${port_config}" DESTINATION "${CURRENT_PACKAGES_DIR}/include/leveldb/port")
 
 file(REMOVE_RECURSE "${CURRENT_PACKAGES_DIR}/debug/include")
 file(REMOVE_RECURSE "${CURRENT_PACKAGES_DIR}/debug/share")

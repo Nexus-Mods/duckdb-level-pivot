@@ -73,13 +73,11 @@ bool LooksLikeStore(const std::string &db_dir);
 // Invokes `callback` for each entry of the table at `table_path`, verifying
 // block checksums. A file that cannot be parsed - a partially written
 // compaction output, say - returns a non-ok status.
-leveldb::Status ReadTableEntries(const std::string &table_path,
-                                 const TableEntryCallback &callback, ReadStats &stats);
+leveldb::Status ReadTableEntries(const std::string &table_path, const TableEntryCallback &callback, ReadStats &stats);
 
 // Invokes `callback` for each entry of the write-ahead log at `log_path`,
 // verifying record checksums. Damaged records are counted as unparsable and
 // skipped, matching leveldb's own recovery, which reports and continues.
-leveldb::Status ReadLogEntries(const std::string &log_path, const TableEntryCallback &callback,
-                               ReadStats &stats);
+leveldb::Status ReadLogEntries(const std::string &log_path, const TableEntryCallback &callback, ReadStats &stats);
 
 } // namespace level_pivot

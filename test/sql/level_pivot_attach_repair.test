@@ -8,9 +8,9 @@
 # stored. Attach is the last point at which that can be caught and the store
 # still rebuilt, so the check runs there by default.
 #
-# Rebuilding is not automatic: it rewrites the store, so the caller opts in
-# with repair_if_corrupt. The fixture holds 24 keys and leveldb reads 16; see
-# scripts/make_unsorted_fixture.py.
+# Rebuilding is a separate, explicit step: level_pivot_repair_store() writes a
+# fresh store beside the damaged one and the caller decides whether to swap it
+# in. The fixture holds 24 keys and leveldb reads 16.
 #
 # The fixture is copied by attaching a rebuild of it, because these tests must
 # not modify the copy in the source tree.

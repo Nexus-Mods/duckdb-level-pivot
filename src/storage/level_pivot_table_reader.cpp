@@ -152,8 +152,7 @@ StoreFiles ListStoreFiles(const std::string &db_dir) {
 	return result;
 }
 
-leveldb::Status ReadTableEntries(const std::string &table_path,
-                                 const TableEntryCallback &callback, ReadStats &stats) {
+leveldb::Status ReadTableEntries(const std::string &table_path, const TableEntryCallback &callback, ReadStats &stats) {
 	leveldb::Env *env = leveldb::Env::Default();
 	uint64_t file_size = 0;
 	leveldb::Status status = env->GetFileSize(table_path, &file_size);
@@ -207,8 +206,7 @@ leveldb::Status ReadTableEntries(const std::string &table_path,
 	return iter->status();
 }
 
-leveldb::Status ReadLogEntries(const std::string &log_path, const TableEntryCallback &callback,
-                               ReadStats &stats) {
+leveldb::Status ReadLogEntries(const std::string &log_path, const TableEntryCallback &callback, ReadStats &stats) {
 	leveldb::Env *env = leveldb::Env::Default();
 	leveldb::SequentialFile *file = nullptr;
 	leveldb::Status status = env->NewSequentialFile(log_path, &file);

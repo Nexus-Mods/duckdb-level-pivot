@@ -67,8 +67,7 @@ void CheckIntegrityFunc(ClientContext &context, TableFunctionInput &data, DataCh
 } // namespace
 
 TableFunction GetCheckIntegrityFunction() {
-	TableFunction func("level_pivot_check_integrity", {LogicalType::VARCHAR}, CheckIntegrityFunc,
-	                   CheckIntegrityBind);
+	TableFunction func("level_pivot_check_integrity", {LogicalType::VARCHAR}, CheckIntegrityFunc, CheckIntegrityBind);
 	return func;
 }
 

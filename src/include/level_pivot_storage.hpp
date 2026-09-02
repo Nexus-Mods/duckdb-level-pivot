@@ -28,22 +28,11 @@ struct ConnectionOptions {
 	bool create_if_missing = false;
 	size_t block_cache_size = static_cast<size_t>(8) * 1024 * 1024;
 	size_t write_buffer_size = static_cast<size_t>(4) * 1024 * 1024;
-	// Verify the checksum of every data block read. Off by default, matching
-	// leveldb: measured at 4-5x on scans, which a store that is scanned whole
-	// on startup cannot absorb. A table's index and metaindex blocks are
-	// checked regardless, since those are read once per table rather than per
-	// block. Worth turning on to investigate a store suspected of damage.
-	bool verify_checksums = false;
-	// Refuse to write a table whose keys are out of order. On by default,
-	// because such a table reads back incomplete with no error reported. The
-	// way out for a store already holding one is to rebuild it; this exists so
-	// that someone who cannot yet do that can still get a writable store back.
-	bool check_key_order = true;
 };
 
 class LevelDBIterator {
 public:
-	LevelDBIterator(leveldb::DB *db, bool verify_checksums);
+	explicit LevelDBIterator(leveldb::DB *db);
 	~LevelDBIterator();
 
 	LevelDBIterator(LevelDBIterator &&other) noexcept;
@@ -157,7 +146,6 @@ private:
 	std::unique_ptr<leveldb::Cache> block_cache_;
 	std::string path_;
 	bool read_only_;
-	bool verify_checksums_;
 	std::atomic<uint64_t> total_writes_ {0};
 	std::atomic<uint64_t> total_puts_ {0};
 	std::atomic<uint64_t> total_deletes_ {0};

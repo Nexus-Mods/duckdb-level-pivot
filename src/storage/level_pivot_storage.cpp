@@ -9,10 +9,9 @@ namespace level_pivot {
 
 // --- LevelDBIterator ---
 
-LevelDBIterator::LevelDBIterator(leveldb::DB *db, bool verify_checksums) {
+LevelDBIterator::LevelDBIterator(leveldb::DB *db) {
 	leveldb::ReadOptions options;
 	options.fill_cache = true;
-	options.verify_checksums = verify_checksums;
 	iter_.reset(db->NewIterator(options));
 }
 
@@ -145,15 +144,17 @@ bool LevelDBWriteBatch::has_pending() const {
 // --- LevelDBConnection ---
 
 LevelDBConnection::LevelDBConnection(const ConnectionOptions &options)
-    : path_(options.db_path), read_only_(options.read_only),
-      verify_checksums_(options.verify_checksums) {
+    : path_(options.db_path), read_only_(options.read_only) {
 	leveldb::Options db_options;
 	db_options.create_if_missing = options.create_if_missing;
 	db_options.write_buffer_size = options.write_buffer_size;
-	db_options.check_key_order = options.check_key_order;
 	// Always on: this covers the index and metaindex blocks, which are read
 	// once when a table is opened rather than on every block read, so it costs
 	// almost nothing. Damage there misdirects every later read of that table.
+	// Per-data-block checksums stay at leveldb's default of off: they cost 4-5x
+	// on scans and cannot catch a block served from the wrong offset, which
+	// carries its own matching CRC. level_pivot_check_integrity turns them on
+	// for the one pass where that cost is worth paying.
 	db_options.paranoid_checks = true;
 	if (options.block_cache_size > 0) {
 		// Options::block_cache is caller-owned; DB::Open does not adopt it, so
@@ -175,7 +176,6 @@ LevelDBConnection::~LevelDBConnection() {
 std::optional<std::string> LevelDBConnection::get(std::string_view key) {
 	std::string value;
 	leveldb::ReadOptions options;
-	options.verify_checksums = verify_checksums_;
 	leveldb::Slice key_slice(key.data(), key.size());
 	leveldb::Status status = db_->Get(options, key_slice, &value);
 	if (status.IsNotFound()) {
@@ -213,7 +213,7 @@ void LevelDBConnection::del(std::string_view key) {
 }
 
 LevelDBIterator LevelDBConnection::iterator() {
-	return LevelDBIterator(db_, verify_checksums_);
+	return LevelDBIterator(db_);
 }
 
 LevelDBWriteBatch LevelDBConnection::create_batch() {

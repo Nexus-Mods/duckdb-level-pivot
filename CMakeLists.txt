@@ -61,6 +61,15 @@ if(leveldb_FOUND)
     endif()
     target_compile_definitions(${EXTENSION_NAME} PRIVATE ${LEVELDB_PLATFORM_DEFINE})
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE ${LEVELDB_PLATFORM_DEFINE})
+
+    # Regenerates test/fixtures/unsorted_table. Built on demand only - it is a
+    # development tool, not part of the extension.
+    add_executable(generate_unsorted_fixture EXCLUDE_FROM_ALL test/generate_unsorted_fixture.cpp)
+    target_link_libraries(generate_unsorted_fixture leveldb::leveldb)
+    foreach(dir ${LEVELDB_INCLUDES})
+        target_include_directories(generate_unsorted_fixture PRIVATE "${dir}/leveldb")
+    endforeach()
+    target_compile_definitions(generate_unsorted_fixture PRIVATE ${LEVELDB_PLATFORM_DEFINE})
 endif()
 
 install(

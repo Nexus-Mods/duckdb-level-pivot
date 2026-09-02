@@ -1,4 +1,5 @@
 # leveldb store files are binary, and CURRENT in particular must end with a
 # single LF - leveldb strips exactly one byte and would otherwise look for a
-# descriptor whose name ends in CR.
+# descriptor whose name ends in CR. Regenerate with the
+# generate_unsorted_fixture target (test/generate_unsorted_fixture.cpp).
 * -text

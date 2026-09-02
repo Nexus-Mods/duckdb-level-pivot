@@ -6,6 +6,11 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include <leveldb/env.h>
+#include <leveldb/status.h>
+
+#include <db/filename.h>
+
 namespace duckdb {
 
 // Surfaces level_pivot::RebuildStore as SQL. The source is only read, and the
@@ -63,6 +68,14 @@ unique_ptr<FunctionData> RepairBind(ClientContext &context, TableFunctionBindInp
 	if (fs.DirectoryExists(pending)) {
 		throw IOException("'" + pending + "' is in the way of the repair; remove it first");
 	}
+
+	// The source must not be open anywhere else.
+	leveldb::FileLock *lock = nullptr;
+	const leveldb::Status lock_status = leveldb::Env::Default()->LockFile(leveldb::LockFileName(source), &lock);
+	if (!lock_status.ok()) {
+		throw IOException("cannot repair '" + source + "' while it is open elsewhere: " + lock_status.ToString());
+	}
+
 	try {
 		data->stats = level_pivot::RebuildStore(source, pending);
 	} catch (...) {
@@ -75,8 +88,10 @@ unique_ptr<FunctionData> RepairBind(ClientContext &context, TableFunctionBindInp
 			// pending directory is inert and named so it cannot be mistaken
 			// for a repaired store
 		}
+		leveldb::Env::Default()->UnlockFile(lock);
 		throw;
 	}
+	leveldb::Env::Default()->UnlockFile(lock);
 	fs.MoveFile(pending, target);
 
 	return std::move(data);
@@ -102,8 +117,8 @@ void RepairFunc(ClientContext &context, TableFunctionInput &data, DataChunk &out
 } // namespace
 
 TableFunction GetRepairStoreFunction() {
-	TableFunction func("level_pivot_repair_store", {LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                   RepairFunc, RepairBind);
+	TableFunction func("level_pivot_repair_store", {LogicalType::VARCHAR, LogicalType::VARCHAR}, RepairFunc,
+	                   RepairBind);
 	return func;
 }
 

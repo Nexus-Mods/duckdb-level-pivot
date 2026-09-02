@@ -40,9 +40,10 @@ void Merge(const TableEntryView &view, std::map<std::string, MergedEntry> &best)
 	}
 }
 
-void ReadStore(const std::string &source, std::map<std::string, MergedEntry> &best,
-               RebuildStats &stats) {
-	auto merge = [&best](const TableEntryView &view) { Merge(view, best); };
+void ReadStore(const std::string &source, std::map<std::string, MergedEntry> &best, RebuildStats &stats) {
+	auto merge = [&best](const TableEntryView &view) {
+		Merge(view, best);
+	};
 
 	// Only the files the descriptor says are live. Reading whatever else is
 	// lying in the directory would bring back keys whose deletions leveldb
@@ -56,8 +57,7 @@ void ReadStore(const std::string &source, std::map<std::string, MergedEntry> &be
 		// so a rebuild would be quietly short. leveldb refuses to open a store
 		// in this state and so do we.
 		throw LevelDBError("the store is missing " + std::to_string(files.missing.size()) +
-		                   " table file(s) its descriptor requires, e.g. '" + files.missing[0] +
-		                   "'");
+		                   " table file(s) its descriptor requires, e.g. '" + files.missing[0] + "'");
 	}
 	stats.unreferenced_files = files.unreferenced.size();
 
@@ -89,8 +89,7 @@ void ReadStore(const std::string &source, std::map<std::string, MergedEntry> &be
 	}
 }
 
-void WriteStore(const std::string &target, const std::map<std::string, MergedEntry> &best,
-                RebuildStats &stats) {
+void WriteStore(const std::string &target, const std::map<std::string, MergedEntry> &best, RebuildStats &stats) {
 	ConnectionOptions options;
 	options.db_path = target;
 	options.read_only = false;
@@ -139,8 +138,8 @@ std::vector<StoreProblem> VerifyStore(const std::string &db_dir) {
 		if (!status.ok()) {
 			problems.push_back({name, "unreadable_log", status.ToString()});
 		} else if (stats.unparsable > 0) {
-			problems.push_back({name, "unparsable_entries",
-			                    std::to_string(stats.unparsable) + " records could not be decoded"});
+			problems.push_back(
+			    {name, "unparsable_entries", std::to_string(stats.unparsable) + " records could not be decoded"});
 		}
 	}
 	for (auto &name : files.tables) {
@@ -187,8 +186,8 @@ std::vector<StoreProblem> VerifyStore(const std::string &db_dir) {
 			                        std::to_string(first_break_at)});
 		}
 		if (stats.unparsable > 0) {
-			problems.push_back({name, "unparsable_entries",
-			                    std::to_string(stats.unparsable) + " entries could not be decoded"});
+			problems.push_back(
+			    {name, "unparsable_entries", std::to_string(stats.unparsable) + " entries could not be decoded"});
 		}
 	}
 	return problems;
