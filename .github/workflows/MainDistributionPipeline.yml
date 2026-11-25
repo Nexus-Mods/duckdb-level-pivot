@@ -18,7 +18,7 @@ jobs:
     # the `runners` input and fixes Windows MSVC activation (probe VS 18 then 2022, force cl).
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@b0a37851ee310dfbe38ffc1fdbfd5f80824162bf
     with:
-      duckdb_version: v1.5.1
+      duckdb_version: v1.5.6
       ci_tools_version: b0a37851ee310dfbe38ffc1fdbfd5f80824162bf
       extension_name: level_pivot
       # Drop the MinGW Windows build (not shipped in production).
