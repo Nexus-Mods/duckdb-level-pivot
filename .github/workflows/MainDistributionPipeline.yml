@@ -18,7 +18,7 @@ jobs:
     # the `runners` input and fixes Windows MSVC activation (probe VS 18 then 2022, force cl).
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@b0a37851ee310dfbe38ffc1fdbfd5f80824162bf
     with:
-      duckdb_version: v1.5.1
+      duckdb_version: v1.5.6
       ci_tools_version: b0a37851ee310dfbe38ffc1fdbfd5f80824162bf
       extension_name: level_pivot
       # Drop the MinGW Windows build (not shipped in production).
@@ -27,6 +27,10 @@ jobs:
       # VS 2026 MSVC (19.51), whose STL removed stdext::checked_array_iterator, which DuckDB v1.5.1's
       # bundled fmt still uses -> third_party/fmt compile error. VS 2022 on windows-2022 still has it.
       runners: '{"windows_amd64": "windows-2022"}'
+      # windows_arm64 is opt-in in extension-ci-tools' distribution matrix (it runs on the
+      # windows-11-arm runner with the arm64-windows-static-release vcpkg triplet). Vortex ships a
+      # native Windows on Arm build, which loads level_pivot from windows_arm64.
+      opt_in_archs: 'windows_arm64'
 
   format-check:
     name: Format Check
