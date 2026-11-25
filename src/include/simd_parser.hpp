@@ -17,6 +17,9 @@
 #if defined(__aarch64__) || defined(_M_ARM64)
 #define LEVEL_PIVOT_AARCH64 1
 #include <arm_neon.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #endif
 
 namespace level_pivot {
@@ -229,7 +232,12 @@ inline void find_delimiters_neon(const char *data, size_t len, size_t start, con
 		uint32_t mask0 = neon_movemask_u8(eq0);
 
 		while (mask0 && count < max_count) {
+#if defined(_MSC_VER)
+			unsigned long bit_pos;
+			_BitScanForward(&bit_pos, mask0);
+#else
 			uint32_t bit_pos = static_cast<uint32_t>(__builtin_ctz(mask0));
+#endif
 			size_t pos = i + bit_pos;
 
 			if (pos >= min_next_pos && pos + delim_len <= len && memcmp(data + pos, delim, delim_len) == 0) {

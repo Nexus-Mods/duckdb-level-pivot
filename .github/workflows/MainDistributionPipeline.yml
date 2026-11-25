@@ -27,6 +27,10 @@ jobs:
       # VS 2026 MSVC (19.51), whose STL removed stdext::checked_array_iterator, which DuckDB v1.5.1's
       # bundled fmt still uses -> third_party/fmt compile error. VS 2022 on windows-2022 still has it.
       runners: '{"windows_amd64": "windows-2022"}'
+      # windows_arm64 is opt-in in extension-ci-tools' distribution matrix (it runs on the
+      # windows-11-arm runner with the arm64-windows-static-release vcpkg triplet). Vortex ships a
+      # native Windows on Arm build, which loads level_pivot from windows_arm64.
+      opt_in_archs: 'windows_arm64'
 
   format-check:
     name: Format Check
